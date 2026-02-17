@@ -1,0 +1,67 @@
+## Visual Studio cache and temp files
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Build results
+bin/
+obj/
+[Bb]uild/
+[Bb]uilds/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+## CMake (if used)
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+CTestTestfile.cmake
+build/
+
+## Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+
+## NuGet
+*.nupkg
+packages/
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+
+## Logs
+*.log
+
+## Generated files
+*.obj
+*.o
+*.pch
+*.pdb
+*.ipch
+*.cache
+*.ilk
+*.tlog
+
+## Other common ignores
+*.tmp
+*.temp
+*.db
+*.opendb
+*.VC.db
+*.VC.opendb
+
+## Backup files
+*~
+*.bak
+
+## Rider / JetBrains (if ever used)
+.idea/
+*.sln.iml

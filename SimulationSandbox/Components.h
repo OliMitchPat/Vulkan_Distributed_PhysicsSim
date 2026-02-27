@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include "World.h"
+#include "PhysicsObject.h"
+
 // --------------------------------------------------
 // Enums used by multiple components
 // --------------------------------------------------
@@ -41,6 +43,40 @@ enum class ParticleType
     Rain,
     Dust,
     Spark
+};
+
+// --------------------------------------------------
+// PhysicsComponent
+// --------------------------------------------------
+
+struct PhysicsComponent
+{
+    PhysicsObject body{};
+
+    PhysicsComponent() = default;
+
+    PhysicsComponent(const glm::vec3& position,
+        const glm::vec3& velocity,
+        float mass)
+        : body(position)
+    {
+        body.SetVelocity(velocity);
+        body.SetMass(mass);
+    }
+};
+
+struct SphereColliderComponent
+{
+    float baseRadius = 0.5f;
+    glm::vec3 localCenter{ 0.0f };
+};
+
+struct PlaneColliderComponent
+{
+    glm::vec3 normal{ 0,1,0 };   // should be normalized
+    float offset = 0.0f;       // plane equation: dot(n, x) - offset = 0
+    // alternatively store a point on plane instead of offset:
+    // glm::vec3 point{0,0,0};
 };
 
 // --------------------------------------------------

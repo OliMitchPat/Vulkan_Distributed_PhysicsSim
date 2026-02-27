@@ -9,7 +9,7 @@
 #include <typeindex>
 #include <memory>
 #include <cassert>
-
+#include <utility>   
 // Optional: track which entities are alive
 class World final{
 public:
@@ -44,6 +44,8 @@ public:
     template<typename T, typename Fn>
     void forEach(Fn fn);
 
+    template<typename A, typename B, typename Fn>
+    void forEach(Fn fn);
     // Later we can add multi-component iteration if needed.
     void Clear();
 
@@ -220,5 +222,24 @@ inline void World::forEach(Fn fn) {
         if (isAlive(e)) {
             fn(e, comp);
         }
+        });
+}
+
+template<typename A, typename B, typename Fn>
+inline void World::forEach(Fn fn)
+{
+    auto* poolA = findPool<A>();
+    auto* poolB = findPool<B>();
+    if (!poolA || !poolB) return;
+
+    poolA->forEach([this, &fn, poolB](Entity e, A& a)
+        {
+            if (!isAlive(e)) return;
+
+            // entity must also have B
+            if (auto* b = poolB->get(e))
+            {
+                fn(e, a, *b);
+            }
         });
 }

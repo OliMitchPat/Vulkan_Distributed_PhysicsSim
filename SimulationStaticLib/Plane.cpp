@@ -1,40 +1,48 @@
 #include "pch.h"
 #include "Plane.h"
 #include <stdexcept>
+#include "Sphere.h"
+#include <cmath>
 #include "MathUtils.h"
 
-Plane::Plane(const Vector3& pointOnPlane, const Vector3& normal)
-    : Collider(pointOnPlane), _Normal(normal)
+Plane::Plane(const glm::vec3& pointOnPlane, const glm::vec3& normal)
+    : Collider(pointOnPlane)
 {
-    if (_Normal.LengthSquared() == 0.0)
+    const float lenSq = glm::dot(normal, normal);
+    if (lenSq == 0.0f)
         throw std::invalid_argument("Plane normal must be non-zero");
+
+    // Normalize once so future dot/distance computations are consistent
+    m_normal = glm::normalize(normal);
 }
 
 // Convention:
 // "Inside" means on the plane or on the side the normal points to.
 // i.e. dot(point - planePoint, normal) >= 0
-bool Plane::IsInside(const Vector3& point) const
+bool Plane::IsInside(const glm::vec3& point) const
 {
-    const Vector3 v = point - _Position;
-    return v.Dot(_Normal) >= 0.0;
+    const glm::vec3 v = point - m_position;
+    return glm::dot(v, m_normal) >= 0.0f;
 }
 
 bool Plane::Intersects(const Line& line) const
 {
     // Segment-plane intersection:
-    // Let signed distances be d0 = dot(S - P0, N), d1 = dot(E - P0, N).
-    // If they have opposite signs (or either is zero), segment intersects plane.
-    const double d0 = (line.Start - _Position).Dot(_Normal);
-    const double d1 = (line.End - _Position).Dot(_Normal);
+    // signed distances d0 = dot(S - P0, N), d1 = dot(E - P0, N)
+    const float d0 = glm::dot(line.Start - m_position, m_normal);
+    const float d1 = glm::dot(line.End - m_position, m_normal);
 
-    if (d0 == 0.0 && d1 == 0.0)
-        return true; // segment lies in plane
+    // If both are exactly 0, the segment lies in plane
+    if (d0 == 0.0f && d1 == 0.0f)
+        return true;
 
-    return (d0 == 0.0) || (d1 == 0.0) || (d0 < 0.0 && d1 > 0.0) || (d0 > 0.0 && d1 < 0.0);
+    // Intersects if either endpoint is on plane or if signs differ
+    return (d0 == 0.0f) || (d1 == 0.0f) || (d0 < 0.0f && d1 > 0.0f) || (d0 > 0.0f && d1 < 0.0f);
 }
 
 bool Plane::Intersects(const Sphere& sphere) const
 {
-    double d = ClosestDistancePointToPlane(sphere.GetPosition(), _Position, _Normal);
+    // Since m_normal is normalized, point-to-plane distance becomes abs(dot(p - p0, n))
+    const float d = std::abs(glm::dot(sphere.GetPosition() - m_position, m_normal));
     return d <= sphere.GetRadius();
 }

@@ -1,14 +1,13 @@
 #pragma once
-#include "Vector3.h"
 
 struct Line
 {
-    Vector3 Start{};
-    Vector3 End{};
+    glm::vec3 Start{};
+    glm::vec3 End{};
 
     Line() = default;
-    Line(const Vector3& start, const Vector3& end) : Start(start), End(end) {}
+    Line(const glm::vec3& start, const glm::vec3& end) : Start(start), End(end) {}
 
-    Vector3 Direction() const { return End - Start; }
-    Vector3 PointAt(double t) const { return Start + (End - Start) * t; }
+    glm::vec3 Direction() const { return End - Start; }
+    glm::vec3 PointAt(float t) const { return Start + (End - Start) * t; }
 };

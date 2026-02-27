@@ -1,19 +1,19 @@
 #pragma once
-#include "Vector3.h"
+#include <glm/glm.hpp>
 #include "Line.h"
 
 class Collider
 {
 public:
-    explicit Collider(const Vector3& position = {}) : _Position(position) {}
+    explicit Collider(const glm::vec3& position = {}) : m_position(position) {}
     virtual ~Collider() = default;
 
-    const Vector3& GetPosition() const { return _Position; }
-    void SetPosition(const Vector3& p) { _Position = p; }
+    const glm::vec3& GetPosition() const { return m_position; }
+    void SetPosition(const glm::vec3& p) { m_position = p; }
 
-    virtual bool IsInside(const Vector3& point) const = 0;
+    virtual bool IsInside(const glm::vec3& point) const = 0;
     virtual bool Intersects(const Line& line) const = 0;
 
 protected:
-    Vector3 _Position{};
+    glm::vec3 m_position{};
 };

@@ -6,6 +6,8 @@
 #include "imGui.h"
 #include <GLFW/glfw3.h>
 #include "Scenario_PrimitiveScene.h"
+#include "PhysicsSystem.h"
+#include "CollisionSystem.h"
 
 static float GetDeltaTimeSeconds()
 {
@@ -20,7 +22,8 @@ static float GetDeltaTimeSeconds()
 int RunSandbox(GLFWwindow* window, Renderer& renderer)
 {
     World world;
-
+    PhysicsSystem physicsSystem;
+	CollisionSystem collisionSystem;
     // You likely already have this type
     RenderSystem renderSystem(renderer);
 
@@ -37,6 +40,8 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer)
 
     bool useFixedTimestep = true;
     float fixedDt = 1.0f / 60.0f;
+    float accumulator = 0.0f;
+    const float maxFrameDt = 0.25f;
 
     CameraRole activeCamera = CameraRole::Overview;
 
@@ -104,22 +109,51 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer)
         glfwPollEvents();
 
         float dtReal = GetDeltaTimeSeconds();
-        float dt = useFixedTimestep ? fixedDt : dtReal;
+        dtReal = std::min(dtReal, maxFrameDt);
 
         if (!ImGui::GetIO().WantCaptureKeyboard)
             moveActiveCamera(dtReal);
 
-        // --- Scenario update ---
+        // --- Scenario + Physics update ---
         if (Scenario* s = scenarios.Current())
         {
-            if (simRunning)
+            if (useFixedTimestep)
             {
-                s->Update(world, dt);
+                // Accumulate real time only while running
+                if (simRunning)
+                {
+                    accumulator += dtReal;
+                }
+                else if (stepOnce)
+                {
+                    // When paused, "Step Once" advances exactly one fixed step
+                    accumulator += fixedDt;
+                    stepOnce = false;
+                }
+
+                // Run as many fixed steps as needed (can be multiple per render)
+                while (accumulator >= fixedDt)
+                {
+                    s->Update(world, fixedDt);
+                    physicsSystem.Update(world, fixedDt);
+                    collisionSystem.Update(world);
+                    accumulator -= fixedDt;
+                }
             }
-            else if (stepOnce)
+            else
             {
-                s->Update(world, dt);
-                stepOnce = false;
+                // Variable timestep mode (one sim step per frame)
+                if (simRunning)
+                {
+                    s->Update(world, dtReal);
+                    physicsSystem.Update(world, dtReal);
+                }
+                else if (stepOnce)
+                {
+                    s->Update(world, dtReal);
+                    physicsSystem.Update(world, dtReal);
+                    stepOnce = false;
+                }
             }
         }
 
@@ -134,15 +168,30 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer)
                     simRunning = !simRunning;
 
                 ImGui::Separator();
+
                 ImGui::Checkbox("Use Fixed Timestep", &useFixedTimestep);
+
+                // Fixed dt edit (reset accumulator if dt changes to avoid catch-up bursts)
+                float oldFixedDt = fixedDt;
                 ImGui::InputFloat("Fixed dt (seconds)", &fixedDt, 0.001f, 0.01f, "%.4f");
                 if (fixedDt < 0.0001f) fixedDt = 0.0001f;
+                if (fixedDt > 0.1f)    fixedDt = 0.1f; // optional upper clamp to prevent silliness
+
+                if (useFixedTimestep && fixedDt != oldFixedDt)
+                    accumulator = 0.0f;
 
                 ImGui::Text("~ %.1f Hz", 1.0f / fixedDt);
 
                 ImGui::Separator();
-                if (!simRunning && ImGui::MenuItem("Step One Timestep"))
-                    stepOnce = true;
+
+                // Integrator selection
+                const char* integrators[] = { "Euler", "Semi-Implicit Euler" };
+                int currentIntegrator = static_cast<int>(physicsSystem.GetIntegrator());
+
+                if (ImGui::Combo("Integrator", &currentIntegrator, integrators, IM_ARRAYSIZE(integrators)))
+                {
+                    physicsSystem.SetIntegrator(static_cast<IntegratorType>(currentIntegrator));
+                }
 
                 ImGui::EndMenu();
             }
@@ -155,7 +204,6 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer)
 
             if (ImGui::BeginMenu("Camera"))
             {
-                // Switch cameras
                 bool isOverview = (activeCamera == CameraRole::Overview);
                 bool isNavigation = (activeCamera == CameraRole::Navigation);
 
@@ -167,7 +215,6 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer)
 
                 ImGui::Separator();
 
-                // Move the active camera (edit the ECS transform)
                 Entity camEntity = INVALID_ENTITY;
                 world.forEach<CameraRoleComponent>([&](Entity e, CameraRoleComponent& r)
                     {
@@ -187,7 +234,6 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer)
                 {
                     ImGui::TextUnformatted("No camera entity found for this role.");
                 }
-
                 ImGui::EndMenu();
             }
 

@@ -76,9 +76,31 @@ void Scenario_PrimitiveScene::OnLoad(World& world)
             });
 
         world.addComponent(e, MaterialComponent{}); // defaults are fine
+
+        world.addComponent(e, PlaneColliderComponent{ glm::normalize(glm::vec3(0,1,0)) });
     }
 
     // --- Sphere ---
+    {
+        Entity e = world.createEntity();
+
+        TransformComponent tr{};
+        tr.position = glm::vec3(5.0f, 2.0f, 0.0f);
+        tr.rotation = glm::vec3(0.0f);
+        tr.scale = glm::vec3(1.0f);
+
+        world.addComponent(e, tr);
+
+        world.addComponent(e, RenderMeshComponent{
+            "sphere.obj",
+            "sky3.png"
+            });
+
+        world.addComponent(e, MaterialComponent{});
+
+        world.addComponent(e, SphereColliderComponent{ 0.5f });
+        world.addComponent(e, PhysicsComponent(tr.position, glm::vec3(-2, 2, 0), 1.0f));
+    }
     {
         Entity e = world.createEntity();
 
@@ -95,5 +117,8 @@ void Scenario_PrimitiveScene::OnLoad(World& world)
             });
 
         world.addComponent(e, MaterialComponent{});
+
+        world.addComponent(e, SphereColliderComponent{ 0.5f });
+        world.addComponent(e, PhysicsComponent(tr.position, glm::vec3(0, 0, 0), 1.0f));
     }
 }

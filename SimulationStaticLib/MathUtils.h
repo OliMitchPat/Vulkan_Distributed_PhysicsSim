@@ -1,45 +1,44 @@
 #pragma once
-#include "Vector3.h"
+#include <glm/glm.hpp>
 #include <cmath>
 #include <stdexcept>
-#include "Sphere.h" 
 
-inline double ClosestDistancePointToLine(
-    const Vector3& point,      // PG
-    const Vector3& linePoint,  // PL
-    const Vector3& lineDir)    // DL
+// Distance from point to infinite line defined by linePoint + t*lineDir
+inline float ClosestDistancePointToLine(
+    const glm::vec3& point,     // PG
+    const glm::vec3& linePoint, // PL
+    const glm::vec3& lineDir)   // DL
 {
-    const double lenSq = lineDir.LengthSquared();
-    if (lenSq == 0.0)
+    const float lenSq = glm::dot(lineDir, lineDir); // |DL|^2
+    if (lenSq == 0.0f)
         throw std::invalid_argument("Line direction cannot be zero vector");
 
-    // Step 1
-    Vector3 v = point - linePoint;
+    // v = PG - PL
+    const glm::vec3 v = point - linePoint;
 
-    // Step 2 (projection)
-    double t = v.Dot(lineDir) / lenSq;
-    Vector3 projection = lineDir * t;
+    // t = (v·DL)/|DL|^2
+    const float t = glm::dot(v, lineDir) / lenSq;
 
-    // Step 3
-    Vector3 perpendicular = v - projection;
+    // perpendicular = v - DL*t
+    const glm::vec3 perpendicular = v - (lineDir * t);
 
-    // Step 4
-    return perpendicular.Length();
+    return glm::length(perpendicular);
 }
 
-inline double ClosestDistancePointToPlane(
-    const Vector3& point,       // PG
-    const Vector3& planePoint,  // PP
-    const Vector3& planeNormal) // N
+// Distance from point to plane defined by planePoint and planeNormal
+inline float ClosestDistancePointToPlane(
+    const glm::vec3& point,       // PG
+    const glm::vec3& planePoint,  // PP
+    const glm::vec3& planeNormal) // N
 {
-    const double nLenSq = planeNormal.LengthSquared();
-    if (nLenSq == 0.0)
+    const float nLenSq = glm::dot(planeNormal, planeNormal); // |N|^2
+    if (nLenSq == 0.0f)
         throw std::invalid_argument("Plane normal cannot be zero vector");
 
-    const Vector3 v = point - planePoint;
+    const glm::vec3 v = point - planePoint;
 
-    const double numerator = std::abs(v.Dot(planeNormal));
-    const double denom = std::sqrt(nLenSq); // |N|
+    const float numerator = std::abs(glm::dot(v, planeNormal));
+    const float denom = std::sqrt(nLenSq); // |N|
 
     return numerator / denom;
 }

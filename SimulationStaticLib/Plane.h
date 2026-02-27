@@ -6,14 +6,14 @@ class Plane : public Collider
 {
 public:
     Plane() = default;
-    Plane(const Vector3& pointOnPlane, const Vector3& normal);
+    Plane(const glm::vec3& pointOnPlane, const glm::vec3& normal);
 
-    const Vector3& GetNormal() const { return _Normal; }
+    const glm::vec3& GetNormal() const { return m_normal; }
 
-    bool IsInside(const Vector3& point) const override;
+    bool IsInside(const glm::vec3& point) const override;
     bool Intersects(const Line& line) const override;
     bool Intersects(const Sphere& sphere) const;
 
 private:
-    Vector3 _Normal{ 0, 1, 0 }; // should be normalized ideally
+    glm::vec3 m_normal{ 0, 1, 0 };
 };

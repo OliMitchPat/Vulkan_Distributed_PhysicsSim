@@ -145,7 +145,6 @@
     <ClInclude Include="PhysicsObject.h" />
     <ClInclude Include="Plane.h" />
     <ClInclude Include="Sphere.h" />
-    <ClInclude Include="Vector3.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">

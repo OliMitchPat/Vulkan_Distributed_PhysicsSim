@@ -102,13 +102,13 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>C:\Users\omitc\source\repos\SimulationStaticLib\SimulationSandbox\GLFW\include;$(Vulkan_SDK)\Include;$(ProjectDir);$(ProjectDir)imgui;$(SolutionDir)SimulationStaticLib\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\omitc\source\repos\SimulationStaticLib\SimulationSandbox\GLFW\include;$(Vulkan_SDK)\Include;$(ProjectDir);$(ProjectDir)imgui;$(SolutionDir)SimulationStaticLib\;$(ProjectDir)GLFW\include;$(SolutionDir)\glm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\Users\omitc\source\repos\SimulationStaticLib\SimulationSandbox\GLFW\lib-vc2022;$(VULKAN_SDK)\Lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>C:\Users\omitc\source\repos\SimulationStaticLib\SimulationSandbox\GLFW\lib-vc2022;$(VULKAN_SDK)\Lib;$(ProjectDir)GLFW\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>glfw3.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>

@@ -65,3 +65,12 @@ project.fragment.lock.json
 ## Rider / JetBrains (if ever used)
 .idea/
 *.sln.iml
+
+## ---- keep required third-party + assets tracked ----
+!glm/
+!glm/**
+!SimulationSandbox/GLFW/
+!SimulationSandbox/GLFW/**
+
+## keep model assets (.obj) tracked
+!SimulationSandbox/models/**/*.obj

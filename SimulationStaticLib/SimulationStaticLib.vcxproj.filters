@@ -25,6 +25,9 @@
     <Filter Include="Source Files\Collision">
       <UniqueIdentifier>{c258774a-c655-4c6f-8f66-d122245ba471}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\Physics">
+      <UniqueIdentifier>{d103ba91-d2cf-4d62-8236-8fbacbc54740}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h">
@@ -78,6 +81,48 @@
     <ClInclude Include="Intersect.h">
       <Filter>Header Files\Collision</Filter>
     </ClInclude>
+    <ClInclude Include="Containment.h">
+      <Filter>Header Files\Collision</Filter>
+    </ClInclude>
+    <ClInclude Include="CollisionResponse.h">
+      <Filter>Header Files\Collision</Filter>
+    </ClInclude>
+    <ClInclude Include="PositionalCorrection.h">
+      <Filter>Header Files\Collision</Filter>
+    </ClInclude>
+    <ClInclude Include="RigidBody.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="Inertia.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="ImpulseSolver.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="ResolveContact.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="Volume.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="BodySetUp.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="ShapeData.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="BodyDispatcher.h">
+      <Filter>Header Files\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="FlatbufferConvert.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SetUpRigidBodyFromFlatbuffer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\700105-WJV-Lab-D\Flatbuffers\Scene_generated.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SimulationStaticLib.cpp">
@@ -96,6 +141,9 @@
       <Filter>Source Files\Collision</Filter>
     </ClCompile>
     <ClCompile Include="IntersectCylinder.cpp">
+      <Filter>Source Files\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="Containment.cpp">
       <Filter>Source Files\Collision</Filter>
     </ClCompile>
   </ItemGroup>

@@ -53,6 +53,9 @@
     <ClCompile Include="ImpulseSolverTest.cpp">
       <Filter>PhysicsResponseTests</Filter>
     </ClCompile>
+    <ClCompile Include="PositionalCorrectionTesting.cpp">
+      <Filter>PhysicsResponseTests</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />

@@ -121,6 +121,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="PlaneContainer.cpp" />
+    <ClCompile Include="PositionalCorrectionTesting.cpp" />
     <ClCompile Include="Sphere-OBB.cpp" />
     <ClCompile Include="Sphere-Plane.cpp" />
     <ClCompile Include="Sphere-Sphere.cpp" />

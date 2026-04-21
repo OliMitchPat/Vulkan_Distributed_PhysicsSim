@@ -172,3 +172,141 @@ TEST(Response_ImpulseSolver, Friction_ReducesTangentialSpeed)
     // And they should not be closing along the normal anymore (or at least less so):
     EXPECT_GE(B.LinearVelocity().y, -1.0f);
 }
+
+TEST(Response_ImpulseSolver, OffCentreCollision_ProducesAngularVelocity)
+{
+    RigidBody A = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f, glm::mat3(1.0f));
+    RigidBody B = MakeDynamicBody(glm::vec3(1, 0, 0), 1.0f, glm::mat3(1.0f));
+
+    A.SetLinearVelocity(glm::vec3(1, 0, 0));
+    B.SetLinearVelocity(glm::vec3(0, 0, 0));
+
+    CollisionManifold m{};
+    m.hit = true;
+    m.normal = glm::vec3(1, 0, 0);
+    m.contactPoint = glm::vec3(1.0f, 1.0f, 0.0f);
+
+    ContactMaterial mat{};
+    mat.restitution = 0.0f;
+
+    SolveContactImpulse(A, B, m, mat);
+
+    // Angular velocity should be non-zero
+    EXPECT_GT(glm::length(B.AngularVelocity()), 0.0f);
+}
+
+TEST(Response_ImpulseSolver, CentreCollision_NoAngularVelocity)
+{
+    RigidBody A = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f, glm::mat3(1.0f));
+    RigidBody B = MakeDynamicBody(glm::vec3(1, 0, 0), 1.0f, glm::mat3(1.0f));
+
+    A.SetLinearVelocity(glm::vec3(1, 0, 0));
+    B.SetLinearVelocity(glm::vec3(0, 0, 0));
+
+    CollisionManifold m{};
+    m.hit = true;
+    m.normal = glm::vec3(1, 0, 0);
+    m.contactPoint = glm::vec3(1.0f, 0.0f, 0.0f); // centre line
+
+    ContactMaterial mat{};
+    mat.restitution = 0.0f;
+
+    SolveContactImpulse(A, B, m, mat);
+
+    ExpectVec3Near(B.AngularVelocity(), glm::vec3(0), 1e-6f);
+}
+
+TEST(Response_ImpulseSolver, DifferentMasses_LightBodyChangesMore)
+{
+    RigidBody A = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f);
+    RigidBody B = MakeDynamicBody(glm::vec3(1, 0, 0), 10.0f);
+
+    A.SetLinearVelocity(glm::vec3(1, 0, 0));
+    B.SetLinearVelocity(glm::vec3(-1, 0, 0));
+
+    CollisionManifold m{};
+    m.hit = true;
+    m.normal = glm::vec3(1, 0, 0);
+    m.contactPoint = glm::vec3(0.5f, 0, 0);
+
+    ContactMaterial mat{};
+    mat.restitution = 1.0f;
+
+    SolveContactImpulse(A, B, m, mat);
+
+    // Light object (A) should change more
+    EXPECT_GT(glm::length(A.LinearVelocity()), glm::length(B.LinearVelocity()));
+}
+
+TEST(Response_ImpulseSolver, StaticFriction_StronglyReducesTangentialMotion)
+{
+    RigidBody A = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f);
+    RigidBody B = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f);
+
+    A.SetLinearVelocity(glm::vec3(0, 0, 0));
+    B.SetLinearVelocity(glm::vec3(0.1f, -2.0f, 0.0f));
+
+    CollisionManifold m{};
+    m.hit = true;
+    m.normal = glm::vec3(0, 1, 0);
+    m.contactPoint = glm::vec3(0);
+
+    ContactMaterial mat{};
+    mat.restitution = 0.0f;
+    mat.staticFriction = 1.0f;
+    mat.dynamicFriction = 0.5f;
+
+    SolveContactImpulse(A, B, m, mat);
+
+    // Should reduce tangential velocity significantly
+    EXPECT_LT(std::abs(B.LinearVelocity().x), 0.1f);
+
+    // And should not flip direction (important!)
+    EXPECT_GE(B.LinearVelocity().x, 0.0f);
+}
+
+TEST(Response_ImpulseSolver, DynamicFriction_ReducesButDoesNotStop)
+{
+    RigidBody A = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f);
+    RigidBody B = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f);
+
+    A.SetLinearVelocity(glm::vec3(0, 0, 0));
+    B.SetLinearVelocity(glm::vec3(10.0f, -1.0f, 0.0f)); // large tangential
+
+    CollisionManifold m{};
+    m.hit = true;
+    m.normal = glm::vec3(0, 1, 0);
+    m.contactPoint = glm::vec3(0);
+
+    ContactMaterial mat{};
+    mat.restitution = 0.0f;
+    mat.staticFriction = 0.1f;
+    mat.dynamicFriction = 0.5f;
+
+    SolveContactImpulse(A, B, m, mat);
+
+    EXPECT_LT(B.LinearVelocity().x, 10.0f);
+    EXPECT_GT(B.LinearVelocity().x, 0.0f); // should NOT fully stop
+}
+
+TEST(Response_ImpulseSolver, AngularDirection_CorrectSign)
+{
+    RigidBody A = MakeDynamicBody(glm::vec3(0, 0, 0), 1.0f, glm::mat3(1.0f));
+    RigidBody B = MakeDynamicBody(glm::vec3(1, 0, 0), 1.0f, glm::mat3(1.0f));
+
+    A.SetLinearVelocity(glm::vec3(1, 0, 0));
+    B.SetLinearVelocity(glm::vec3(0, 0, 0));
+
+    CollisionManifold m{};
+    m.hit = true;
+    m.normal = glm::vec3(1, 0, 0);
+    m.contactPoint = glm::vec3(1, 1, 0); // above centre
+
+    ContactMaterial mat{};
+    mat.restitution = 0.0f;
+
+    SolveContactImpulse(A, B, m, mat);
+
+    // Expect rotation around Z (negative direction for this configuration)
+    EXPECT_LT(B.AngularVelocity().z, 0.0f);
+}

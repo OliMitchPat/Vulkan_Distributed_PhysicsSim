@@ -36,13 +36,7 @@
     <ClInclude Include="pch.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Collider.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="NotImplementedException.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="PhysicsObject.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Sphere.h">
@@ -84,9 +78,6 @@
     <ClInclude Include="Containment.h">
       <Filter>Header Files\Collision</Filter>
     </ClInclude>
-    <ClInclude Include="CollisionResponse.h">
-      <Filter>Header Files\Collision</Filter>
-    </ClInclude>
     <ClInclude Include="PositionalCorrection.h">
       <Filter>Header Files\Collision</Filter>
     </ClInclude>
@@ -120,7 +111,7 @@
     <ClInclude Include="SetUpRigidBodyFromFlatbuffer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\700105-WJV-Lab-D\Flatbuffers\Scene_generated.h">
+    <ClInclude Include="Scene_generated.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -4,6 +4,7 @@
 #include "BodyDispatcher.h"
 #include "FlatbufferConvert.h"
 
+#include <algorithm>
 #include <string>
 
 template <typename DensityLookupFn>
@@ -22,10 +23,10 @@ inline void SetupRigidBodyFromFlatbufferObject(
     const BehaviourType behaviour = SimIO::ToBehaviourType(obj->behaviour_type());
     const CollisionType collisionType = SimIO::ToCollisionType(obj->collision_type());
 
-    // Material density
+    // Material density (default 0 => static by your BodySetup policy)
     float density = 0.0f;
     if (obj->material())
-        density = getDensityByMaterialName(obj->material()->str());
+        density = std::max(0.0f, getDensityByMaterialName(obj->material()->str()));
 
     // Shape (with defaults)
     const ShapeData shape = SimIO::ToShapeData(obj);
@@ -34,16 +35,10 @@ inline void SetupRigidBodyFromFlatbufferObject(
     if (behaviour == BehaviourType::Simulated)
     {
         const auto* sim = obj->behaviour_as_SimulatedObject();
-        if (sim && sim->initial_state())
-        {
-            body.SetLinearVelocity(SimIO::ToLinearVelocity(sim->initial_state()));
-            body.SetAngularVelocity(SimIO::ToAngularVelocityRad(sim->initial_state()));
-        }
-        else
-        {
-            body.SetLinearVelocity(glm::vec3(0.0f));
-            body.SetAngularVelocity(glm::vec3(0.0f));
-        }
+        const auto* state = (sim) ? sim->initial_state() : nullptr;
+
+        body.SetLinearVelocity(SimIO::ToLinearVelocity(state));
+        body.SetAngularVelocity(SimIO::ToAngularVelocityRad(state));
     }
     else
     {
@@ -51,6 +46,5 @@ inline void SetupRigidBodyFromFlatbufferObject(
         body.SetAngularVelocity(glm::vec3(0.0f));
     }
 
-    // Configure mass/inertia/motion type
     SetupBodyFromShape(body, shape, density, behaviour, collisionType);
 }

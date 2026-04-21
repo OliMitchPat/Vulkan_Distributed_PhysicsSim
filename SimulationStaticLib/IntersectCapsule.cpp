@@ -22,8 +22,10 @@ CollisionManifold Intersect(const WorldCapsule& a, const WorldCapsule& b)
     if (distSq > rSum * rSum)
         return m;
 
-    const float dist = std::sqrt(std::max(distSq, kEps));
-    const glm::vec3 n = (dist > kEps) ? (delta / dist) : glm::vec3(1, 0, 0);
+    const bool degenerate = (distSq <= kEps * kEps);
+
+    const float dist = degenerate ? 0.0f : std::sqrt(distSq);
+    const glm::vec3 n = degenerate ? glm::vec3(1, 0, 0) : (delta / dist);
 
     m.hit = true;
     m.normal = n;

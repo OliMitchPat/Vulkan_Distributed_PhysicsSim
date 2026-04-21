@@ -2,12 +2,61 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
-    <ClCompile Include="Test.cpp">
-      <Filter>CollisionTests</Filter>
+    <ClCompile Include="Sphere-Sphere.cpp">
+      <Filter>CollisionTests\SphereDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Sphere-OBB.cpp">
+      <Filter>CollisionTests\SphereDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Sphere-Plane.cpp">
+      <Filter>CollisionTests\SphereDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Capusle-Capsulecpp.cpp">
+      <Filter>CollisionTests\CapsuleDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Capsule-Plane.cpp">
+      <Filter>CollisionTests\CapsuleDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Capusle-OBB.cpp">
+      <Filter>CollisionTests\CapsuleDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Capsule-Cylinder.cpp">
+      <Filter>CollisionTests\CapsuleDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="OBB-Plane.cpp">
+      <Filter>CollisionTests\OBBDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="OBB-OBB.cpp">
+      <Filter>CollisionTests\OBBDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Cylinder-Plane.cpp">
+      <Filter>CollisionTests\CylinderDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Cylinder-Cylinder.cpp">
+      <Filter>CollisionTests\CylinderDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="Cylinder-OBB.cpp">
+      <Filter>CollisionTests\CylinderDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="PlaneContainer.cpp">
+      <Filter>CollisionTests\ContainerDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="SphereContainer.cpp">
+      <Filter>CollisionTests\ContainerDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="OBBContainer.cpp">
+      <Filter>CollisionTests\ContainerDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="CylinderContainer.cpp">
+      <Filter>CollisionTests\ContainerDetection</Filter>
+    </ClCompile>
+    <ClCompile Include="ImpulseSolverTest.cpp">
+      <Filter>PhysicsResponseTests</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
+    <ClInclude Include="TestUtils.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
@@ -15,6 +64,24 @@
   <ItemGroup>
     <Filter Include="CollisionTests">
       <UniqueIdentifier>{41771043-d1a7-4017-9144-f687c3042042}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CollisionTests\SphereDetection">
+      <UniqueIdentifier>{38554f18-4cf5-4c1f-b7b5-74798860b561}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CollisionTests\CapsuleDetection">
+      <UniqueIdentifier>{7a3b589b-8d11-49fb-b69f-0806baee8297}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CollisionTests\OBBDetection">
+      <UniqueIdentifier>{13488d9f-1cf0-4845-bc76-92344ee22535}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CollisionTests\CylinderDetection">
+      <UniqueIdentifier>{660e5b47-5c2b-4d46-8832-e5f2b4d8619b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CollisionTests\ContainerDetection">
+      <UniqueIdentifier>{0f5ea6d1-f474-49bc-8b0a-0bd39d379ed3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="PhysicsResponseTests">
+      <UniqueIdentifier>{0c738ed4-f628-4298-9b5d-cab4cd1aa57e}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

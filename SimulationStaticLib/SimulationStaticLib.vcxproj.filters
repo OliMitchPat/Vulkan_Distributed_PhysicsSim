@@ -78,9 +78,6 @@
     <ClInclude Include="Containment.h">
       <Filter>Header Files\Collision</Filter>
     </ClInclude>
-    <ClInclude Include="PositionalCorrection.h">
-      <Filter>Header Files\Collision</Filter>
-    </ClInclude>
     <ClInclude Include="RigidBody.h">
       <Filter>Header Files\Physics</Filter>
     </ClInclude>
@@ -113,6 +110,9 @@
     </ClInclude>
     <ClInclude Include="Scene_generated.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PositionalCorrection.h">
+      <Filter>Header Files\Physics</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

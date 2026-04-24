@@ -63,6 +63,12 @@
     <ClInclude Include="imgui\imconfig.h">
       <Filter>Header Files\ImGui&amp;Extras.h</Filter>
     </ClInclude>
+    <ClInclude Include="NetAddress.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="PeerConfig.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
     <ClInclude Include="Renderer.h">
       <Filter>Header Files\Render.h</Filter>
     </ClInclude>
@@ -119,8 +125,14 @@
     <ClCompile Include="Main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="NetAddress.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
     <ClCompile Include="ObjLoader.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="PeerConfig.cpp">
+      <Filter>Source Files\Systems</Filter>
     </ClCompile>
     <ClCompile Include="ScenarioManager.cpp">
       <Filter>Source Files</Filter>

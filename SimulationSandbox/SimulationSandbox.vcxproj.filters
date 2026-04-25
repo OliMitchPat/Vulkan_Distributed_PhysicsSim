@@ -63,6 +63,9 @@
     <ClInclude Include="imgui\imconfig.h">
       <Filter>Header Files\ImGui&amp;Extras.h</Filter>
     </ClInclude>
+    <ClInclude Include="LoopController.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
     <ClInclude Include="NetAddress.h">
       <Filter>Header Files\Systems.h</Filter>
     </ClInclude>
@@ -93,8 +96,14 @@
     <ClInclude Include="stb_image.h">
       <Filter>Header Files\ImGui&amp;Extras.h</Filter>
     </ClInclude>
+    <ClInclude Include="ThreadUtils.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
     <ClInclude Include="ObjLoader.h">
       <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="WorldSnapshot.h">
+      <Filter>Header Files\Render.h</Filter>
     </ClInclude>
     <ClInclude Include="ComponentPool.h">
       <Filter>Header Files\EC Parts.h</Filter>

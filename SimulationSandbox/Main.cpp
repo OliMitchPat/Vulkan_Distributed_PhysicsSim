@@ -13,7 +13,7 @@
 
 int gForceShading = -1;
 
-int RunSandbox(GLFWwindow* window, Renderer& renderer); // forward decl
+int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cfg); // forward decl
 
 // Print a summary of the loaded peer configuration to stdout.
 static void PrintConfigSummary(const Net::PeerConfig& cfg)
@@ -113,7 +113,7 @@ int main(int argc, char* argv[])
         glfwSetFramebufferSizeCallback(window, Renderer::framebufferResizeCallback);
 
         // Single run (no old reset bridge)
-        RunSandbox(window, renderer);
+        RunSandbox(window, renderer, cfg);
 
         renderer.waitIdle();
 

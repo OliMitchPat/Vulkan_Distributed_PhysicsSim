@@ -131,6 +131,7 @@
     <ClInclude Include="ComponentPool.h" />
     <ClInclude Include="Components.h" />
     <ClInclude Include="EcsTypes.h" />
+    <ClInclude Include="LoopController.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
     <ClInclude Include="imgui\imgui_impl_glfw.h" />
@@ -153,8 +154,10 @@
     <ClInclude Include="ScenarioManager.h" />
     <ClInclude Include="Scenario_PrimitiveScene.h" />
     <ClInclude Include="stb_image.h" />
+    <ClInclude Include="ThreadUtils.h" />
     <ClInclude Include="Vertex.h" />
     <ClInclude Include="World.h" />
+    <ClInclude Include="WorldSnapshot.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="imgui\imgui.cpp" />

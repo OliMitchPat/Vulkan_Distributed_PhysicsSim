@@ -10,7 +10,7 @@
 #include <cmath>
 #include <algorithm>
 
-class CollisionSystem
+/*class CollisionSystem
 {
 public:
     void Update(World& world)
@@ -208,4 +208,4 @@ private:
                     });
             });
     }
-};
+};*/

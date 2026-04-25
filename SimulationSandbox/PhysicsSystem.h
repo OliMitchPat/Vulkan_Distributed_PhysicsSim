@@ -2,7 +2,7 @@
 #include "World.h"
 #include "Components.h"
 
-class PhysicsSystem
+/*class PhysicsSystem
 {
 public:
     void Update(World& world, float dt)
@@ -24,4 +24,4 @@ public:
 
 private:
     IntegratorType m_integrator = IntegratorType::Euler;
-};
+};*/

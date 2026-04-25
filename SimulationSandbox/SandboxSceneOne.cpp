@@ -15,13 +15,14 @@
  * Camera state lives entirely in the render thread; it is NOT part of the World
  * after the initial scene load extracts starting values.
  */
-
+#define NOMINMAX
+#include <Windows.h> 
 #include "World.h"
 #include "ScenarioManager.h"
 #include "Scenario.h"
 #include "Renderer.h"
 #include "RenderScene.h"
-#include "imGui.h"
+#include "imgui.h"
 #include <GLFW/glfw3.h>
 #include "Scenario_PrimitiveScene.h"
 #include "PhysicsSystem.h"
@@ -30,7 +31,7 @@
 #include "WorldSnapshot.h"
 #include "ThreadUtils.h"
 #include "LoopController.h"
-
+#include "RigidBody.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <thread>
@@ -39,7 +40,8 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
-
+#include <mutex>
+#include <cstdint>
 // ============================================================================
 // Shared control state between threads
 // ============================================================================

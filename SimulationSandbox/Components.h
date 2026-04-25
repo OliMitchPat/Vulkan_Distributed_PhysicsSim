@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 #include "World.h"
-#include "PhysicsObject.h"
 
 // --------------------------------------------------
 // Enums used by multiple components
@@ -49,21 +48,6 @@ enum class ParticleType
 // PhysicsComponent
 // --------------------------------------------------
 
-struct PhysicsComponent
-{
-    PhysicsObject body{};
-
-    PhysicsComponent() = default;
-
-    PhysicsComponent(const glm::vec3& position,
-        const glm::vec3& velocity,
-        float mass)
-        : body(position)
-    {
-        body.SetVelocity(velocity);
-        body.SetMass(mass);
-    }
-};
 
 struct SphereColliderComponent
 {

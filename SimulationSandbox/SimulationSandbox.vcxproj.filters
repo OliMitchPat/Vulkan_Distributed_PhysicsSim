@@ -129,6 +129,21 @@
     <ClInclude Include="ScenarioManager.h">
       <Filter>Header Files\EC Parts.h</Filter>
     </ClInclude>
+    <ClInclude Include="NetProtocol.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="UdpSocket.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="NetPeer.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="NetworkingSystem.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UdpPeer.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp">
@@ -186,6 +201,12 @@
       <Filter>Source Files\Render.cpp</Filter>
     </ClCompile>
     <ClCompile Include="PhysicsSystem.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="UdpSocket.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="NetworkingSystem.cpp">
       <Filter>Source Files\Systems</Filter>
     </ClCompile>
   </ItemGroup>

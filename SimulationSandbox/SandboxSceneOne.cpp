@@ -15,8 +15,10 @@
  * Camera state lives entirely in the render thread; it is NOT part of the World
  * after the initial scene load extracts starting values.
  */
-#define NOMINMAX
-#include <Windows.h> 
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <Windows.h>
 #include "World.h"
 #include "ScenarioManager.h"
 #include "Scenario.h"
@@ -42,6 +44,7 @@
 #include <string>
 #include <mutex>
 #include <cstdint>
+#include "NetworkingSystem.h"
 // ============================================================================
 // Shared control state between threads
 // ============================================================================
@@ -56,6 +59,7 @@ struct SimSharedState
     std::atomic<bool>  useFixedTimestep { true };
     std::atomic<float> fixedDt          { 1.0f / 60.0f };
     std::atomic<int>   integratorType   { 0 };   // IntegratorType enum value
+    std::atomic<bool> sendGlobalCommand{ false };
 
     // Shared clear-colour (4 floats; written by UI, read by sim for snapshot)
     float clearColour[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
@@ -333,33 +337,46 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
     }
 }
 
-// ============================================================================
-// Networking thread entry point (scaffold — no real sockets yet)
-// ============================================================================
-static void NetworkingThreadFunc(SimSharedState& shared)
+static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& cfg)
 {
+    using namespace Net;
+
+    // ---- Thread setup ----
     const int numCores = ThreadUtils::LogicalCoreCount();
     const int assignedCore = (ThreadUtils::CORE_NET_0 < numCores)
-                           ? ThreadUtils::CORE_NET_0
-                           : (numCores - 1);
+        ? ThreadUtils::CORE_NET_0
+        : (numCores - 1);
+
     ThreadUtils::PinCurrentThreadToCore(assignedCore);
     ThreadUtils::SetCurrentThreadName("Net");
     shared.netCoreAssigned = assignedCore;
+
+    // ---- Networking system ----
+    NetworkingSystem net;
+    if (!net.Init(cfg))
+        return;
 
     LoopController lc(shared.targetNetworkHz.load(std::memory_order_relaxed));
 
     while (shared.appRunning.load(std::memory_order_relaxed))
     {
         lc.setTargetHz(shared.targetNetworkHz.load(std::memory_order_relaxed));
-        lc.beginFrame();
+
+        float dt = lc.beginFrame();
         shared.measuredNetworkHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
 
-        // TODO Milestone 2: send/receive UDP packets here
+        net.Update();
+
+        if (shared.sendGlobalCommand.exchange(false))
+        {
+            net.SendGlobalCommand(/* commandId */ 1);
+        }
 
         lc.endFrame();
     }
-}
 
+    net.Shutdown();
+}
 // ============================================================================
 // RunSandbox — main / render thread
 // ============================================================================
@@ -428,7 +445,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         std::ref(scenarios), std::ref(physicsSystem),
         std::ref(collisionSystem));
 
-    std::thread netThread(NetworkingThreadFunc, std::ref(shared));
+    std::thread netThread(NetworkingThreadFunc, std::ref(shared), std::cref(cfg));
 
     // ---- Render / UI loop state ----
     LoopController renderLC(shared.targetRenderHz.load(std::memory_order_relaxed));
@@ -583,6 +600,10 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     shared.targetNetworkHz.store(uiNetHz,   std::memory_order_relaxed);
                 if (ImGui::SliderFloat("Sim Hz",     &uiSimHz,     0.0f, 500.0f, "%.0f"))
                     shared.targetSimHz.store(uiSimHz,       std::memory_order_relaxed);
+                if (ImGui::Button("Send Global Command"))
+                {
+                    shared.sendGlobalCommand.store(true, std::memory_order_relaxed);
+                }
 
                 ImGui::TextDisabled("(0 = uncapped)");
                 ImGui::Separator();

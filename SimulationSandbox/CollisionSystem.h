@@ -2,27 +2,60 @@
 #include "World.h"
 #include "Components.h"
 
-// From your physics library:
 #include "Sphere.h"
 #include "Plane.h"
 
-#include <glm/glm.hpp>
-#include <cmath>
-#include <algorithm>
+#include "CollisionManifold.h"
+#include "ImpulseSolver.h"
 
-/*class CollisionSystem
+#include <glm/glm.hpp>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+
+class CollisionSystem
 {
 public:
     void Update(World& world)
     {
-        SphereVsPlane(world);
-        SphereVsSphere(world);
+        m_contacts.clear();
+
+        BuildSpherePlaneContacts(world);
+        BuildSphereSphereContacts(world);
+
+        // Solve contacts multiple times (important for stability)
+        const int iterations = 8;
+        for (int i = 0; i < iterations; i++)
+        {
+            for (auto& c : m_contacts)
+            {
+                SolveContactImpulse(*c.A, *c.B, c.manifold, c.material);
+            }
+        }
+
+        // Positional correction (after impulses)
+        for (auto& c : m_contacts)
+        {
+            PositionalCorrection(*c.A, *c.B, c.manifold);
+        }
     }
 
 private:
+    struct Contact
+    {
+        RigidBody* A;
+        RigidBody* B;
+        CollisionManifold manifold;
+        ContactMaterial material;
+    };
+
+    std::vector<Contact> m_contacts;
+
+    // =========================================================
+
     static float SphereWorldRadius(const TransformComponent& tr, const SphereColliderComponent& sc)
     {
-        const float s = std::max(tr.scale.x, std::max(tr.scale.y, tr.scale.z));
+        const float s = std::max({ tr.scale.x, tr.scale.y, tr.scale.z });
         return sc.baseRadius * s;
     }
 
@@ -30,7 +63,10 @@ private:
     {
         return tr.position + sc.localCenter;
     }
-    static void SphereVsPlane(World& world)
+
+    // =========================================================
+
+    void BuildSpherePlaneContacts(World& world)
     {
         world.forEach<TransformComponent, PhysicsComponent>([&](Entity e, TransformComponent& tr, PhysicsComponent& phys)
             {
@@ -40,57 +76,46 @@ private:
                 const float r = SphereWorldRadius(tr, *sc);
                 const glm::vec3 c = SphereWorldCenter(tr, *sc);
 
-                Sphere sphereQuery(c, r);
+                Sphere sphere(c, r);
 
-                world.forEach<PlaneColliderComponent>([&](Entity planeE, PlaneColliderComponent& pc)
+                world.forEach<TransformComponent, PlaneColliderComponent>([&](Entity planeE, TransformComponent& planeTr, PlaneColliderComponent& pc)
                     {
-                        auto* planeTr = world.getComponent<TransformComponent>(planeE);
-                        if (!planeTr) return;
+                        Plane plane(planeTr.position, pc.normal);
 
-                        Plane planeQuery(planeTr->position, pc.normal);
+                        if (!plane.Intersects(sphere)) return;
 
-                        if (planeQuery.Intersects(sphereQuery))
-                        {
-                            const glm::vec3 n = planeQuery.GetNormal();      // normalized (declare ONCE)
-                            const glm::vec3 v = phys.body.Velocity();
-                            const glm::vec3 p0 = planeQuery.GetPosition();
+                        const glm::vec3 n = plane.GetNormal();
+                        const float signedD = glm::dot(c - planeTr.position, n);
+                        const float penetration = r - std::abs(signedD);
 
-                            // Only collide if moving INTO the plane
-                            float vDotN = glm::dot(v, n);
-                            if (vDotN < 0.0f)  // moving towards plane
-                            {
-                                // Coefficient of restitution (0 = no bounce, 1 = perfect bounce)
-                                float restitution = 0.8f;  // or make configurable
+                        if (penetration <= 0.0f) return;
 
-                                // Impulse = -(1 + e) * (v · n) * n
-                                glm::vec3 impulse = -(1.0f + restitution) * vDotN * n;
+                        CollisionManifold m;
+                        m.hit = true;
+                        m.normal = (signedD >= 0.0f) ? n : -n;
+                        m.penetration = penetration;
+                        m.contactPoint = c - m.normal * r;
 
-                                phys.body.ApplyImpulse(impulse);
-                            }
+                        ContactMaterial mat;
+                        mat.restitution = 0.8f;
 
-                            // Depenetrate in a consistent direction
-                            // Signed distance from center to plane
-                            const float signedD = glm::dot(c - p0, n);
+                        // Static plane body
+                        static RigidBody staticPlane;
+                        staticPlane.SetMotionType(BodyMotionType::Static);
 
-                            // We want the center to end up at distance r from the plane
-                            // If signedD is positive, center is on normal side; push along +n
-                            // If signedD is negative, center is on opposite side; push along -n
-                            const float penetration = r - std::abs(signedD);
-
-                            if (penetration > 0.0f)
-                            {
-                                const glm::vec3 pushDir = (signedD >= 0.0f) ? n : -n;
-
-                                // Move transform (and physics) by penetration along the correct side
-                                tr.position += pushDir * penetration;
-                                phys.body.SetPosition(tr.position);
-                            }
-                        }
+                        m_contacts.push_back({
+                            &phys.body,
+                            &staticPlane,
+                            m,
+                            mat
+                            });
                     });
             });
     }
 
-    static void SphereVsSphere(World& world)
+    // =========================================================
+
+    void BuildSphereSphereContacts(World& world)
     {
         world.forEach<TransformComponent, PhysicsComponent>([&](Entity aE, TransformComponent& aTr, PhysicsComponent& aPhys)
             {
@@ -99,7 +124,6 @@ private:
 
                 const float ra = SphereWorldRadius(aTr, *aCol);
                 const glm::vec3 ca = SphereWorldCenter(aTr, *aCol);
-                Sphere aQuery(ca, ra);
 
                 world.forEach<TransformComponent, PhysicsComponent>([&](Entity bE, TransformComponent& bTr, PhysicsComponent& bPhys)
                     {
@@ -110,102 +134,69 @@ private:
 
                         const float rb = SphereWorldRadius(bTr, *bCol);
                         const glm::vec3 cb = SphereWorldCenter(bTr, *bCol);
-                        Sphere bQuery(cb, rb);
 
-                        if (aQuery.CollideWith(bQuery))
+                        const glm::vec3 delta = cb - ca;
+                        const float distSq = glm::dot(delta, delta);
+                        const float rSum = ra + rb;
+
+                        if (distSq >= rSum * rSum) return;
+
+                        glm::vec3 n;
+                        float dist;
+
+                        if (distSq > 1e-8f)
                         {
-                            const glm::vec3 delta = cb - ca;
-                            const float distSq = glm::dot(delta, delta);
-                            const float rSum = ra + rb;
-
-                            if (distSq > 1e-8f)
-                            {
-                                const float dist = std::sqrt(distSq);
-                                const glm::vec3 n = delta / dist;  // collision normal (from A to B)
-
-                                // Get velocities
-                                const glm::vec3 vA = aPhys.body.Velocity();
-                                const glm::vec3 vB = bPhys.body.Velocity();
-
-                                // Relative velocity (A relative to B)
-                                const glm::vec3 vRel = vA - vB;
-                                float vRelDotN = glm::dot(vRel, n);
-
-                                // Only apply impulse if spheres are approaching
-                                if (vRelDotN > 0.0f)  // A moving towards B
-                                {
-                                    float restitution = 0.8f;
-                                    float mA = aPhys.body.Mass();
-                                    float mB = bPhys.body.Mass();
-
-                                    // Impulse calculation for two bodies
-                                    // For equal mass: impulse magnitude = -(1+e) * vRel·n / 2
-                                    float impulseMag = -(1.0f + restitution) * vRelDotN / (1.0f / mA + 1.0f / mB);
-
-                                    glm::vec3 impulse = impulseMag * n;
-
-                                    // Apply equal and opposite impulses
-                                    aPhys.body.ApplyImpulse(impulse);
-                                    bPhys.body.ApplyImpulse(-impulse);
-                                }
-
-                                // Depenetration: separate spheres if overlapping
-                                const float penetration = rSum - dist;
-
-                                if (penetration > 0.0f)
-                                {
-                                    const bool aMovable = (aPhys.body.InverseMass() > 0.0f);
-                                    const bool bMovable = (bPhys.body.InverseMass() > 0.0f);
-
-                                    if (aMovable && bMovable)
-                                    {
-                                        aTr.position -= n * (penetration * 0.5f);
-                                        bTr.position += n * (penetration * 0.5f);
-                                        aPhys.body.SetPosition(aTr.position);
-                                        bPhys.body.SetPosition(bTr.position);
-                                    }
-                                    else if (aMovable && !bMovable)
-                                    {
-                                        aTr.position -= n * penetration;
-                                        aPhys.body.SetPosition(aTr.position);
-                                    }
-                                    else if (!aMovable && bMovable)
-                                    {
-                                        bTr.position += n * penetration;
-                                        bPhys.body.SetPosition(bTr.position);
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                // Centers are basically identical; choose an arbitrary separation axis
-                                // (prevents NaNs from normalization)
-                                const glm::vec3 n(1.0f, 0.0f, 0.0f);
-                                const float penetration = rSum;
-
-                                const bool aMovable = (aPhys.body.InverseMass() > 0.0f);
-                                const bool bMovable = (bPhys.body.InverseMass() > 0.0f);
-
-                                if (aMovable && bMovable)
-                                {
-                                    aTr.position -= n * (penetration * 0.5f);
-                                    bTr.position += n * (penetration * 0.5f);
-                                    aPhys.body.SetPosition(aTr.position);
-                                    bPhys.body.SetPosition(bTr.position);
-                                }
-                                else if (aMovable && !bMovable)
-                                {
-                                    aTr.position -= n * penetration;
-                                    aPhys.body.SetPosition(aTr.position);
-                                }
-                                else if (!aMovable && bMovable)
-                                {
-                                    bTr.position += n * penetration;
-                                    bPhys.body.SetPosition(bTr.position);
-                                }
-                            }
+                            dist = std::sqrt(distSq);
+                            n = delta / dist;
                         }
+                        else
+                        {
+                            // fallback axis
+                            n = glm::vec3(1, 0, 0);
+                            dist = rSum;
+                        }
+
+                        const float penetration = rSum - dist;
+
+                        CollisionManifold m;
+                        m.hit = true;
+                        m.normal = n;
+                        m.penetration = penetration;
+                        m.contactPoint = ca + n * ra;
+
+                        ContactMaterial mat;
+                        mat.restitution = 0.8f;
+
+                        m_contacts.push_back({
+                            &aPhys.body,
+                            &bPhys.body,
+                            m,
+                            mat
+                            });
                     });
             });
     }
-};*/
+
+    // =========================================================
+
+    static void PositionalCorrection(RigidBody& A, RigidBody& B, const CollisionManifold& m)
+    {
+        const float percent = 0.8f;   // correction strength
+        const float slop = 0.01f;     // penetration allowance
+
+        float invMassA = A.EffectiveInverseMass();
+        float invMassB = B.EffectiveInverseMass();
+
+        float totalInvMass = invMassA + invMassB;
+        if (totalInvMass <= 0.0f) return;
+
+        float correctionMag = std::max(m.penetration - slop, 0.0f) / totalInvMass;
+        glm::vec3 correction = percent * correctionMag * m.normal;
+
+        if (A.IsDynamic())
+            A.SetPosition(A.Position() - correction * invMassA);
+
+        if (B.IsDynamic())
+            B.SetPosition(B.Position() + correction * invMassB);
+    }
+};

@@ -141,6 +141,9 @@
     <ClInclude Include="imgui\imstb_textedit.h" />
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="NetAddress.h" />
+    <ClInclude Include="NetPeer.h" />
+    <ClInclude Include="NetProtocol.h" />
+    <ClInclude Include="NetworkingSystem.h" />
     <ClInclude Include="ObjLoader.h" />
     <ClInclude Include="PeerConfig.h" />
     <ClInclude Include="PhysicsSystem.h" />
@@ -155,6 +158,8 @@
     <ClInclude Include="Scenario_PrimitiveScene.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="ThreadUtils.h" />
+    <ClInclude Include="UdpPeer.h" />
+    <ClInclude Include="UdpSocket.h" />
     <ClInclude Include="Vertex.h" />
     <ClInclude Include="World.h" />
     <ClInclude Include="WorldSnapshot.h" />
@@ -169,6 +174,7 @@
     <ClCompile Include="imgui\imgui_widgets.cpp" />
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="NetAddress.cpp" />
+    <ClCompile Include="NetworkingSystem.cpp" />
     <ClCompile Include="ObjLoader.cpp" />
     <ClCompile Include="PeerConfig.cpp" />
     <ClCompile Include="PhysicsSystem.cpp" />
@@ -179,6 +185,7 @@
     <ClCompile Include="SandboxSceneOne.cpp" />
     <ClCompile Include="ScenarioManager.cpp" />
     <ClCompile Include="Scenario_PrimitiveScene.cpp" />
+    <ClCompile Include="UdpSocket.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SimulationStaticLib\SimulationStaticLib.vcxproj">

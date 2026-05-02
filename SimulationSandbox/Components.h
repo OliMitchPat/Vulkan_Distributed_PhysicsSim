@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "World.h"
+#include "ShapeData.h"
 
 // --------------------------------------------------
 // Enums used by multiple components
@@ -72,6 +73,53 @@ struct PlaneColliderComponent
     float offset = 0.0f;       // plane equation: dot(n, x) - offset = 0
     // alternatively store a point on plane instead of offset:
     // glm::vec3 point{0,0,0};
+};
+
+struct CuboidColliderComponent
+{
+    glm::vec3 halfExtents{ 0.5f, 0.5f, 0.5f };  // half-size in each axis
+};
+
+struct CylinderColliderComponent
+{
+    float radius = 0.5f;
+    float height = 1.0f;  // full height; aligned to local Y axis
+};
+
+struct CapsuleColliderComponent
+{
+    float radius = 0.5f;
+    float height = 1.0f;  // full height of the cylindrical segment; aligned to local Y axis
+};
+
+// --------------------------------------------------
+// ShapeComponent
+// --------------------------------------------------
+//
+// Generic shape component that wraps a ShapeData variant.
+// Preferred over the individual collider components when
+// loading objects from FlatBuffers scenes.
+//
+struct ShapeComponent
+{
+    ShapeData     shape;
+    CollisionType collisionType = CollisionType::SOLID;
+};
+
+// --------------------------------------------------
+// NameComponent
+// --------------------------------------------------
+//
+// Stores the resolved display name for an entity.
+// Objects without a name in the FlatBuffer get an
+// auto-generated name such as "object 0".
+//
+struct NameComponent
+{
+    std::string name;
+
+    NameComponent() = default;
+    explicit NameComponent(std::string n) : name(std::move(n)) {}
 };
 
 // --------------------------------------------------

@@ -14,7 +14,8 @@ public:
             {
                 if (!phys.body.IsDynamic()) return;
 
-                phys.body.AddForce(gravity * phys.body.Mass());
+                if (m_gravityEnabled)
+                    phys.body.AddForce(gravity * phys.body.Mass());
             });
 
         // 2. Integrate AFTER collision resolution
@@ -29,6 +30,10 @@ public:
     void SetIntegrator(IntegratorType type) { m_integrator = type; }
     IntegratorType GetIntegrator() const { return m_integrator; }
 
+    void SetGravityEnabled(bool enabled) { m_gravityEnabled = enabled; }
+    bool IsGravityEnabled() const { return m_gravityEnabled; }
+
 private:
     IntegratorType m_integrator = IntegratorType::Euler;
+    bool           m_gravityEnabled = true;
 };

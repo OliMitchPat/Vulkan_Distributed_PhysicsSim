@@ -160,6 +160,7 @@
     <ClInclude Include="RigidBody.h" />
     <ClInclude Include="Scene_generated.h" />
     <ClInclude Include="SetUpRigidBodyFromFlatbuffer.h" />
+    <ClInclude Include="SceneLoader.h" />
     <ClInclude Include="ShapeData.h" />
     <ClInclude Include="Sphere.h" />
     <ClInclude Include="Transform.h" />

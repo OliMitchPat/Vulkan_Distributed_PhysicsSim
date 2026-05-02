@@ -10,6 +10,7 @@
 #include "ShapeData.h"
 
 #include "Scene_generated.h"
+#include "Transform.h"
 
 namespace SimIO
 {
@@ -192,6 +193,31 @@ namespace SimIO
         s.y = (std::abs(s.y) > 1e-8f) ? s.y : def.y;
         s.z = (std::abs(s.z) > 1e-8f) ? s.z : def.z;
         return s;
+    }
+
+    inline float ToUniformScale_MaxAbs(const Simulation::Transform* t, float def = 1.0f)
+    {
+        const glm::vec3 s = ToScaleOrDefault(t, glm::vec3(def));
+
+        const float ax = std::abs(s.x);
+        const float ay = std::abs(s.y);
+        const float az = std::abs(s.z);
+
+        const float u = std::max(ax, std::max(ay, az));
+        return (u > 1e-8f) ? u : def;
+    }
+
+    inline Transform ToPhysicsTransform(const Simulation::Transform* t)
+    {
+        Transform out{};
+        out.position = ToPosition(t);
+
+        // Use the same quaternion conversion you already have
+        const glm::quat q = ToOrientationQuat(t);
+        out.rotation = glm::mat3_cast(q);
+
+        out.scale = ToUniformScale_MaxAbs(t, 1.0f);
+        return out;
     }
 
     // -----------------------

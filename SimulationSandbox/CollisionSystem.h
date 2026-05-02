@@ -1,12 +1,17 @@
 #pragma once
+#define NOMINMAX
+#include <Windows.h>
+
 #include "World.h"
 #include "Components.h"
 
+#include "WorldShapes.h"
+#include "BuildWorldShapes.h"
+#include "Intersect.h"
+#include "ResolveContact.h"
+#include "Transform.h"
 #include "Sphere.h"
 #include "Plane.h"
-
-#include "CollisionManifold.h"
-#include "ImpulseSolver.h"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -66,37 +71,35 @@ private:
 
     // =========================================================
 
+  // --- inside CollisionSystem.h ---
+
     void BuildSpherePlaneContacts(World& world)
     {
-        world.forEach<TransformComponent, PhysicsComponent>([&](Entity e, TransformComponent& tr, PhysicsComponent& phys)
+        world.forEach<TransformComponent, PhysicsComponent>(
+            [&](Entity e, TransformComponent& tr, PhysicsComponent& phys)
             {
                 auto* sc = world.getComponent<SphereColliderComponent>(e);
                 if (!sc) return;
 
-                const float r = SphereWorldRadius(tr, *sc);
-                const glm::vec3 c = SphereWorldCenter(tr, *sc);
+                // Build world-sphere from your ECS data
+                WorldSphere ws{};
+                ws.center = SphereWorldCenter(tr, *sc);
+                ws.radius = SphereWorldRadius(tr, *sc);
 
-                Sphere sphere(c, r);
-
-                world.forEach<TransformComponent, PlaneColliderComponent>([&](Entity planeE, TransformComponent& planeTr, PlaneColliderComponent& pc)
+                // Iterate planes
+                world.forEach<TransformComponent, PlaneColliderComponent>(
+                    [&](Entity, TransformComponent& planeTr, PlaneColliderComponent& pc)
                     {
-                        Plane plane(planeTr.position, pc.normal);
+                        // Build world-plane from ECS data
+                        WorldPlane wp{};
+                        wp.point = planeTr.position;
+                        wp.normal = glm::normalize(pc.normal);
 
-                        if (!plane.Intersects(sphere)) return;
+                        // Narrow-phase intersection is now a free function
+                        CollisionManifold m = Intersect(ws, wp);
+                        if (!m.hit) return;
 
-                        const glm::vec3 n = plane.GetNormal();
-                        const float signedD = glm::dot(c - planeTr.position, n);
-                        const float penetration = r - std::abs(signedD);
-
-                        if (penetration <= 0.0f) return;
-
-                        CollisionManifold m;
-                        m.hit = true;
-                        m.normal = (signedD >= 0.0f) ? n : -n;
-                        m.penetration = penetration;
-                        m.contactPoint = c - m.normal * r;
-
-                        ContactMaterial mat;
+                        ContactMaterial mat{};
                         mat.restitution = 0.8f;
 
                         // Static plane body
@@ -113,58 +116,34 @@ private:
             });
     }
 
-    // =========================================================
-
     void BuildSphereSphereContacts(World& world)
     {
-        world.forEach<TransformComponent, PhysicsComponent>([&](Entity aE, TransformComponent& aTr, PhysicsComponent& aPhys)
+        world.forEach<TransformComponent, PhysicsComponent>(
+            [&](Entity aE, TransformComponent& aTr, PhysicsComponent& aPhys)
             {
                 auto* aCol = world.getComponent<SphereColliderComponent>(aE);
                 if (!aCol) return;
 
-                const float ra = SphereWorldRadius(aTr, *aCol);
-                const glm::vec3 ca = SphereWorldCenter(aTr, *aCol);
+                WorldSphere a{};
+                a.center = SphereWorldCenter(aTr, *aCol);
+                a.radius = SphereWorldRadius(aTr, *aCol);
 
-                world.forEach<TransformComponent, PhysicsComponent>([&](Entity bE, TransformComponent& bTr, PhysicsComponent& bPhys)
+                world.forEach<TransformComponent, PhysicsComponent>(
+                    [&](Entity bE, TransformComponent& bTr, PhysicsComponent& bPhys)
                     {
                         if (bE <= aE) return;
 
                         auto* bCol = world.getComponent<SphereColliderComponent>(bE);
                         if (!bCol) return;
 
-                        const float rb = SphereWorldRadius(bTr, *bCol);
-                        const glm::vec3 cb = SphereWorldCenter(bTr, *bCol);
+                        WorldSphere b{};
+                        b.center = SphereWorldCenter(bTr, *bCol);
+                        b.radius = SphereWorldRadius(bTr, *bCol);
 
-                        const glm::vec3 delta = cb - ca;
-                        const float distSq = glm::dot(delta, delta);
-                        const float rSum = ra + rb;
+                        CollisionManifold m = Intersect(a, b);
+                        if (!m.hit) return;
 
-                        if (distSq >= rSum * rSum) return;
-
-                        glm::vec3 n;
-                        float dist;
-
-                        if (distSq > 1e-8f)
-                        {
-                            dist = std::sqrt(distSq);
-                            n = delta / dist;
-                        }
-                        else
-                        {
-                            // fallback axis
-                            n = glm::vec3(1, 0, 0);
-                            dist = rSum;
-                        }
-
-                        const float penetration = rSum - dist;
-
-                        CollisionManifold m;
-                        m.hit = true;
-                        m.normal = n;
-                        m.penetration = penetration;
-                        m.contactPoint = ca + n * ra;
-
-                        ContactMaterial mat;
+                        ContactMaterial mat{};
                         mat.restitution = 0.8f;
 
                         m_contacts.push_back({

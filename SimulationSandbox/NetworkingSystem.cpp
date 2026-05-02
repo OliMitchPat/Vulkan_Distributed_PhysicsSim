@@ -9,13 +9,11 @@ namespace Net
     // ============================================================
     // Internal helper: find peer by address
     // ============================================================
-    static Peer* FindPeer(std::vector<Peer>& peers, const sockaddr_storage& addr)
+    static Peer* FindPeerById(std::vector<Peer>& peers, int peerId)
     {
         for (auto& p : peers)
-        {
-            if (memcmp(&p.addr, &addr, sizeof(sockaddr_in)) == 0)
+            if (p.peerId == peerId)
                 return &p;
-        }
         return nullptr;
     }
 
@@ -25,7 +23,7 @@ namespace Net
     bool NetworkingSystem::Init(const PeerConfig& cfg)
     {
         std::string err;
-        if (!m_socket.Open(cfg.bind_port, err))
+        if (!m_socket.Open(cfg.bind_ip, cfg.bind_port, err))
         {
             std::cout << "Socket error: " << err << "\n";
             return false;
@@ -74,7 +72,7 @@ namespace Net
 
         for (auto& p : m_peers)
         {
-            m_socket.Send(p.addr, &msg, sizeof(msg));
+            m_socket.Send(p.addr, p.addrLen, &msg, sizeof(msg));
         }
     }
 
@@ -88,52 +86,74 @@ namespace Net
         ack.peerId = (uint8_t)localPeerId;
         ack.ack = seq;
 
-        socket.Send(peer.addr, &ack, sizeof(ack));
+        socket.Send(peer.addr, peer.addrLen, &ack, sizeof(ack));
     }
 
     // ============================================================
-    // Send Reliable Message
-    // ============================================================
-    void SendReliable(UdpSocket& socket, Peer& peer, const void* data, int size)
+// Send Reliable Message
+// ============================================================
+    static void SendReliable(UdpSocket& socket, Peer& peer, const void* data, int size)
     {
-        socket.Send(peer.addr, data, size);
+        socket.Send(peer.addr, peer.addrLen, data, size);
 
         PendingMessage msg;
-        msg.data.assign((const char*)data, (const char*)data + size);
-        msg.seq = ((const MsgHeader*)data)->seq;
+        msg.data.assign(reinterpret_cast<const char*>(data),
+            reinterpret_cast<const char*>(data) + size);
+        msg.seq = reinterpret_cast<const MsgHeader*>(data)->seq;
         msg.timer = 0.0f;
+        msg.retries = 0;
 
-        peer.resendQueue.push_back(msg);
+        peer.resendQueue.push_back(std::move(msg));
     }
 
     // ============================================================
     // Update
     // ============================================================
-    void NetworkingSystem::Update()
+    void NetworkingSystem::Update(float dt)
     {
         sockaddr_storage from{};
 
         // ---- Receive loop ----
         int size = 0;
-        while ((size = m_socket.Receive(from, m_recvBuffer, sizeof(m_recvBuffer))) > 0)
+        while ((size = m_socket.Receive(from, m_recvBuffer, (int)sizeof(m_recvBuffer))) > 0)
         {
             HandlePacket(from, m_recvBuffer, size);
         }
 
         // ---- Resend logic ----
-        const float dt = 1.0f / 60.0f; // simple for now
+        constexpr float RESEND_INTERVAL_SEC = 0.5f;
+        constexpr int   MAX_RETRIES = 10;
 
         for (auto& peer : m_peers)
         {
-            for (auto& msg : peer.resendQueue)
+            // Iterate with index so we can erase safely
+            for (size_t i = 0; i < peer.resendQueue.size(); /* increment inside */)
             {
+                auto& msg = peer.resendQueue[i];
                 msg.timer += dt;
 
-                if (msg.timer > 0.5f)
+                if (msg.timer >= RESEND_INTERVAL_SEC)
                 {
-                    m_socket.Send(peer.addr, msg.data.data(), (int)msg.data.size());
+                    if (msg.retries >= MAX_RETRIES)
+                    {
+                        // Give up on this message
+                        std::cout << "[NET] Drop reliable msg seq=" << msg.seq
+                            << " to peer " << peer.peerId
+                            << " (max retries reached)\n";
+
+                        peer.resendQueue.erase(peer.resendQueue.begin() + i);
+                        continue; // don't increment i (we erased current)
+                    }
+
+                    // Resend
+                    m_socket.Send(peer.addr, peer.addrLen,
+                        msg.data.data(), (int)msg.data.size());
+
                     msg.timer = 0.0f;
+                    msg.retries++;
                 }
+
+                ++i;
             }
         }
     }
@@ -143,16 +163,26 @@ namespace Net
     // ============================================================
     void NetworkingSystem::HandlePacket(const sockaddr_storage& from, const char* data, int size)
     {
-        if (size < sizeof(MsgHeader)) return;
+        if (size < (int)sizeof(MsgHeader))
+            return;
 
-        const MsgHeader* hdr = (const MsgHeader*)data;
+        const MsgHeader* hdr = reinterpret_cast<const MsgHeader*>(data);
 
         if (hdr->protocolVersion != PROTOCOL_VERSION)
             return;
 
-        Peer* peer = FindPeer(m_peers, from);
+        // Basic sanity: ignore invalid/self
+        if (hdr->peerId == 0 || (int)hdr->peerId == m_localPeerId)
+            return;
+
+        Peer* peer = FindPeerById(m_peers, (int)hdr->peerId);
         if (!peer)
             return;
+
+        // Learn/update the sender address so ACKs/resends go to the correct endpoint.
+        // (This is important now that we no longer match peers by address.)
+        peer->addr = from;
+        peer->addrLen = Net::SockaddrLen(from);
 
         switch ((MsgType)hdr->msgType)
         {
@@ -165,7 +195,7 @@ namespace Net
             reply.peerId = (uint8_t)m_localPeerId;
             reply.seq = peer->nextSeq++;
 
-            m_socket.Send(from, &reply, sizeof(reply));
+            m_socket.Send(peer->addr, peer->addrLen, &reply, (int)sizeof(reply));
             break;
         }
 
@@ -177,7 +207,6 @@ namespace Net
 
         case MsgType::ACK:
         {
-            // ?? Remove acknowledged message
             auto& queue = peer->resendQueue;
 
             queue.erase(
@@ -186,42 +215,40 @@ namespace Net
                     {
                         return m.seq == hdr->ack;
                     }),
-                queue.end()
-            );
+                queue.end());
 
             break;
         }
 
         case MsgType::GLOBAL_COMMAND:
         {
-            std::cout << "Received GLOBAL_COMMAND from peer " << (int)hdr->peerId << "\n";
-
-            //  Always ACK reliable messages
+            // Always ACK reliable messages (even duplicates)
             SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
 
-            //  Make sure payload exists
-            if (size < sizeof(MsgHeader) + sizeof(GlobalCommandPayload))
+            // Duplicate suppression (prevents applying the same reliable command twice)
+            if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)
                 break;
 
-            //  Read payload
-            const GlobalCommandPayload* payload =
-                (const GlobalCommandPayload*)(data + sizeof(MsgHeader));
+            peer->lastReceivedSeq = hdr->seq;
 
-            //  Handle command
+            std::cout << "Received GLOBAL_COMMAND from peer " << (int)hdr->peerId << "\n";
+
+            if (size < (int)sizeof(MsgHeader) + (int)sizeof(GlobalCommandPayload))
+                break;
+
+            const GlobalCommandPayload* payload =
+                reinterpret_cast<const GlobalCommandPayload*>(data + sizeof(MsgHeader));
+
             switch ((GlobalCommandType)payload->commandType)
             {
             case GlobalCommandType::ToggleGravity:
-            {
                 std::cout << "GLOBAL: Toggle Gravity\n";
                 // later: hook into physics system
                 break;
-            }
 
             case GlobalCommandType::ResetScene:
-            {
                 std::cout << "GLOBAL: Reset Scene\n";
                 break;
-            }
 
             default:
                 break;
@@ -234,6 +261,7 @@ namespace Net
             break;
         }
     }
+
     void NetworkingSystem::SendGlobalCommand(uint8_t commandType)
     {
         for (auto& peer : m_peers)

@@ -1,0 +1,253 @@
+namespace Simulation;
+
+// =======================
+// Basic Math Types
+// =======================
+
+struct Vec3 {
+  x: float;
+  y: float;
+  z: float;
+}
+
+struct RotationEuler {
+  yaw: float;   // rotation around Y axis (degrees)
+  pitch: float; // rotation around X axis (degrees)
+  roll: float;  // rotation around Z axis (degrees)
+}
+
+struct PhysicsState {
+  linear_velocity: Vec3; // metres/second
+  angular_velocity: Vec3; // degrees/second
+}
+
+struct Transform {
+  position: Vec3;
+  orientation: RotationEuler;
+  scale: Vec3;
+}
+
+struct FloatRange {
+  min: float;
+  max: float;
+}
+
+struct Vec3Range {
+  min: Vec3;
+  max: Vec3;
+}
+
+// =======================
+// Cameras
+// =======================
+
+union CameraType {
+  PerspectiveCamera,
+  OrthographicCamera
+}
+
+table Camera {
+  name: string;
+  transform: Transform;
+  camera_type: CameraType;
+}
+
+table PerspectiveCamera {
+  fov: float;
+  near: float;
+  far: float;
+}
+
+table OrthographicCamera {
+  size: float;
+  near: float;
+  far: float;
+}
+
+// =======================
+// Shapes
+// =======================
+
+union Shape {
+ Sphere,
+ Plane,
+ Capsule,
+ Cylinder,
+ Cuboid
+}
+
+table Sphere { radius: float; }
+table Plane { normal: Vec3; } // local-space normal, rotated by object transform
+table Capsule { radius: float; height: float; }
+table Cylinder { radius: float; height: float; }
+table Cuboid { size: Vec3; }
+
+// =======================
+// Behaviour
+// =======================
+
+union Behaviour {
+  StaticObject,
+  SimulatedObject,
+  AnimatedObject
+}
+
+table StaticObject {
+}
+
+enum EasingType : byte { LINEAR, SMOOTHSTEP }
+enum PathMode : byte { STOP, LOOP, REVERSE }
+
+enum ObjectOwnerType : byte { ONE, TWO, THREE, FOUR }
+
+table Waypoint {
+  position: Vec3;
+  rotation: RotationEuler;
+  time: float; // absolute time to reach this waypoint
+}
+
+table AnimatedObject {
+  waypoints: [Waypoint];
+  total_duration: float;
+  easing: EasingType;
+  path_mode: PathMode;
+}
+
+table SimulatedObject {
+  initial_state: PhysicsState;
+  
+  owner: ObjectOwnerType;
+  
+}
+
+// =======================
+// Object Definition
+// =======================
+
+enum CollisionType : byte {
+  SOLID, // normal object (outside is empty, inside is solid)
+  CONTAINER // inverted (inside is empty, outside is solid)
+}
+
+table Object {
+  name: string;
+  transform: Transform;
+  material: string;
+  shape: Shape;
+  behaviour: Behaviour;
+  collision_type: CollisionType = SOLID; 
+}
+
+// =======================
+// Materials
+// =======================
+
+table Material {
+  name: string;
+  density: float;
+}
+
+table MaterialInteraction {
+  material_a: string;
+  material_b: string;
+  restitution: float;
+  static_friction: float;
+  dynamic_friction: float;
+}
+
+// =======================
+// Spawning
+// =======================
+
+union SpawnType {
+  SingleBurstSpawn,
+  RepeatingSpawn
+}
+
+union SpawnLocation {
+  FixedLocation,
+  RandomBox,
+  RandomSphere
+}
+
+table RepeatingSpawn {
+  interval: float;
+  max_count: uint;
+}
+
+table SingleBurstSpawn {
+  count: uint;
+}
+
+table FixedLocation {
+  transform: Transform;
+}
+
+table RandomBox {
+  min: Vec3;
+  max: Vec3;
+}
+
+table RandomSphere {
+  center: Vec3;
+  radius: float;
+}
+
+enum SpawnerOwnerType : byte { ONE, TWO, THREE, FOUR, SEQUENTIAL }
+
+table BaseSpawner {
+  name: string;
+  start_time: float = 0; // time (seconds) when spawning starts
+  spawn_type: SpawnType;
+  location: SpawnLocation;
+  linear_velocity: Vec3Range; // initial linear velocity range (metres/second)
+  angular_velocity: Vec3Range; // initial angular velocity range (degrees/second)
+  material: string; // material name for spawned objects
+  owner: SpawnerOwnerType;
+}
+
+table SphereSpawner {
+  base: BaseSpawner;
+  radius_range: FloatRange;
+}
+
+table CylinderSpawner {
+  base: BaseSpawner;
+  radius_range: FloatRange;
+  height_range: FloatRange;
+}
+
+table CapsuleSpawner {
+  base: BaseSpawner;
+  radius_range: FloatRange;
+  height_range: FloatRange;
+}
+
+table CuboidSpawner {
+  base: BaseSpawner;
+  size_range: Vec3Range;
+}
+
+union SpawnerType {
+  SphereSpawner,
+  CylinderSpawner,
+  CapsuleSpawner,
+  CuboidSpawner
+}
+
+// =======================
+// Scene
+// =======================
+
+table Scene {
+  name: string;
+  description: string;
+  gravity_on: bool = true;
+  cameras: [Camera];
+  objects: [Object];
+  spawners: [SpawnerType];
+  materials: [Material];
+  interactions: [MaterialInteraction];
+}
+
+root_type Scene;

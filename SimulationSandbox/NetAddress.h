@@ -17,25 +17,54 @@
 #include <cstdint>
 #include <string>
 
-namespace Net {
+namespace Net
+{
+    struct NetEndpoint
+    {
+        sockaddr_storage addr{};
+        int addrLen = 0;
+    };
 
-/*
- * Resolve 'host' (hostname or numeric IP) and 'port' to a sockaddr_storage.
- *
- * Prefers AF_INET (IPv4); falls back to AF_INET6 if no IPv4 result exists.
- * Returns true on success and populates 'addrOut'.
- * On failure writes a description to 'errorOut' and returns false.
- */
-bool ResolveAddress(const std::string& host,
-                    uint16_t           port,
-                    sockaddr_storage&  addrOut,
-                    std::string&       errorOut);
+    // Correct sockaddr length for sendto()/bind()/etc.
+    inline int SockaddrLen(const sockaddr_storage& addr)
+    {
+        switch (addr.ss_family)
+        {
+        case AF_INET:  return (int)sizeof(sockaddr_in);
+        case AF_INET6: return (int)sizeof(sockaddr_in6);
+        default:       return (int)sizeof(sockaddr_storage);
+        }
+    }
 
-/*
- * Returns a human-readable string for an address stored in 'addr',
- * e.g. "192.168.1.10:9001" or "[::1]:9001".
- * Returns "<unknown>" if the family is unsupported.
- */
-std::string AddressToString(const sockaddr_storage& addr);
+    /*
+     * Resolve 'host' (hostname or numeric IP) and 'port' to a sockaddr_storage.
+     *
+     * Prefers AF_INET (IPv4); falls back to AF_INET6 if no IPv4 result exists.
+     * Returns true on success and populates 'addrOut'.
+     * On failure writes a description to 'errorOut' and returns false.
+     */
+    bool ResolveAddress(const std::string& host,
+        uint16_t           port,
+        sockaddr_storage& addrOut,
+        std::string& errorOut);
 
-} // namespace Net
+    // Convenience overload that also provides addrLen.
+    inline bool ResolveAddress(const std::string& host,
+        uint16_t           port,
+        NetEndpoint& out,
+        std::string& errorOut)
+    {
+        if (!ResolveAddress(host, port, out.addr, errorOut))
+            return false;
+
+        out.addrLen = SockaddrLen(out.addr);
+        return true;
+    }
+
+    /*
+     * Returns a human-readable string for an address stored in 'addr',
+     * e.g. "192.168.1.10:9001" or "[::1]:9001".
+     * Returns "<unknown>" if the family is unsupported.
+     */
+    std::string AddressToString(const sockaddr_storage& addr);
+}

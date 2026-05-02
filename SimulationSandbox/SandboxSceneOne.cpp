@@ -365,7 +365,7 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
         float dt = lc.beginFrame();
         shared.measuredNetworkHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
 
-        net.Update();
+        net.Update(dt);
 
         if (shared.sendGlobalCommand.exchange(false))
         {

@@ -1,3 +1,7 @@
+#include "World.h"
+#include "Components.h"
+#include "RigidBody.h" 
+
 class PhysicsSystem
 {
 public:

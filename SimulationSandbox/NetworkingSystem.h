@@ -15,7 +15,7 @@ namespace Net
         bool Init(const PeerConfig& cfg);
         void Shutdown();
 
-        void Update();
+        void Update(float dt);
         void SendGlobalCommand(uint8_t commandType);
     private:
         void SendHello();

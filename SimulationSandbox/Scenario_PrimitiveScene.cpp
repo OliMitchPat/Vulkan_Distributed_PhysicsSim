@@ -91,16 +91,19 @@ void Scenario_PrimitiveScene::OnLoad(World& world)
 
         world.addComponent(e, tr);
 
-        world.addComponent(e, RenderMeshComponent{
-            "sphere.obj",
-            "sky3.png"
-            });
-
+        world.addComponent(e, RenderMeshComponent{ "sphere.obj", "sky3.png" });
         world.addComponent(e, MaterialComponent{});
-
         world.addComponent(e, SphereColliderComponent{ 0.5f });
-        world.addComponent(e, PhysicsComponent(tr.position, glm::vec3(-2, 2, 0), 10.0f));
+
+        PhysicsComponent phys{};
+        phys.body.SetMotionType(BodyMotionType::Dynamic);
+        phys.body.SetMass(10.0f);
+        phys.body.SetPosition(tr.position);
+        phys.body.SetLinearVelocity(glm::vec3(-2.0f, 2.0f, 0.0f));
+
+        world.addComponent(e, phys);
     }
+
     {
         Entity e = world.createEntity();
 
@@ -111,14 +114,16 @@ void Scenario_PrimitiveScene::OnLoad(World& world)
 
         world.addComponent(e, tr);
 
-        world.addComponent(e, RenderMeshComponent{
-            "sphere.obj",
-            "sky3.png"
-            });
-
+        world.addComponent(e, RenderMeshComponent{ "sphere.obj", "sky3.png" });
         world.addComponent(e, MaterialComponent{});
-
         world.addComponent(e, SphereColliderComponent{ 0.5f });
-        world.addComponent(e, PhysicsComponent(tr.position, glm::vec3(2, 0, 0), 1.0f));
+
+        PhysicsComponent phys{};
+        phys.body.SetMotionType(BodyMotionType::Dynamic);
+        phys.body.SetMass(1.0f);
+        phys.body.SetPosition(tr.position);
+        phys.body.SetLinearVelocity(glm::vec3(2.0f, 0.0f, 0.0f));
+
+        world.addComponent(e, phys);
     }
 }

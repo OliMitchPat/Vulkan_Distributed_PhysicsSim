@@ -158,7 +158,6 @@
     <ClInclude Include="Scenario_PrimitiveScene.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="ThreadUtils.h" />
-    <ClInclude Include="UdpPeer.h" />
     <ClInclude Include="UdpSocket.h" />
     <ClInclude Include="Vertex.h" />
     <ClInclude Include="World.h" />

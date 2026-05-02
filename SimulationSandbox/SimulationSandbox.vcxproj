@@ -156,6 +156,7 @@
     <ClInclude Include="Scenario.h" />
     <ClInclude Include="ScenarioManager.h" />
     <ClInclude Include="Scenario_PrimitiveScene.h" />
+    <ClInclude Include="Scenario_FlatbufferScene.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="ThreadUtils.h" />
     <ClInclude Include="UdpSocket.h" />
@@ -184,6 +185,7 @@
     <ClCompile Include="SandboxSceneOne.cpp" />
     <ClCompile Include="ScenarioManager.cpp" />
     <ClCompile Include="Scenario_PrimitiveScene.cpp" />
+    <ClCompile Include="Scenario_FlatbufferScene.cpp" />
     <ClCompile Include="UdpSocket.cpp" />
   </ItemGroup>
   <ItemGroup>

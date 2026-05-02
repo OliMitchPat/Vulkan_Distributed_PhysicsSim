@@ -27,6 +27,7 @@
 #include "imgui.h"
 #include <GLFW/glfw3.h>
 #include "Scenario_PrimitiveScene.h"
+#include "Scenario_FlatbufferScene.h"
 #include "PhysicsSystem.h"
 #include "CollisionSystem.h"
 #include "PeerConfig.h"
@@ -60,6 +61,12 @@ struct SimSharedState
     std::atomic<float> fixedDt          { 1.0f / 60.0f };
     std::atomic<int>   integratorType   { 0 };   // IntegratorType enum value
     std::atomic<bool> sendGlobalCommand{ false };
+
+    // Scene switching: render thread writes, sim thread reads and acts
+    std::atomic<int> requestedSceneIndex{ -1 };
+
+    // Gravity enable flag: updated by sim thread after scene switch
+    std::atomic<bool> gravityOn{ true };
 
     // Shared clear-colour (4 floats; written by UI, read by sim for snapshot)
     float clearColour[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
@@ -298,6 +305,33 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
         physicsSystem.SetIntegrator(integ);
 
+        // ----- Handle scene switch request from render/UI thread -----
+        {
+            int desired = shared.requestedSceneIndex.load(std::memory_order_acquire);
+            if (desired >= 0 && desired < scenarios.Count())
+            {
+                if (desired != scenarios.CurrentIndex())
+                {
+                    scenarios.SwitchTo(world, desired);
+                    accumulator = 0.0f;  // discard stale accumulator
+
+                    // Apply scene gravity
+                    const bool grav = scenarios.Current()
+                                          ? scenarios.Current()->GravityOn()
+                                          : true;
+                    physicsSystem.SetGravityEnabled(grav);
+                    shared.gravityOn.store(grav, std::memory_order_relaxed);
+                }
+                // Only clear the value we consumed; if the render thread
+                // has already posted a newer request, the CAS fails and
+                // that request will be processed next tick.
+                shared.requestedSceneIndex.compare_exchange_strong(
+                    desired, -1,
+                    std::memory_order_release,
+                    std::memory_order_relaxed);
+            }
+        }
+
         if (Scenario* s = scenarios.Current())
         {
             if (useFixed)
@@ -389,6 +423,10 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     ScenarioManager  scenarios;
 
     scenarios.Add(std::make_unique<Scenario_PrimitiveScene>());
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
+        "assets/scenes/newtonsCradle.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
+        "assets/scenes/bouncingBalls.bin"));
     if (scenarios.Count() > 0)
         scenarios.SwitchTo(world, 0);
 
@@ -397,6 +435,14 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     shared.targetRenderHz .store(cfg.render_hz,     std::memory_order_relaxed);
     shared.targetNetworkHz.store(cfg.network_hz,    std::memory_order_relaxed);
     shared.targetSimHz    .store(cfg.simulation_hz, std::memory_order_relaxed);
+
+    // Initialise gravity from the initial scene
+    if (scenarios.Current())
+    {
+        const bool grav = scenarios.Current()->GravityOn();
+        physicsSystem.SetGravityEnabled(grav);
+        shared.gravityOn.store(grav, std::memory_order_relaxed);
+    }
 
     // Initialise clear colour from World
     {
@@ -586,6 +632,33 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 ImGui::Separator();
                 ImGui::DragFloat3("Position",        &renderCamera.position.x, 0.1f);
                 ImGui::DragFloat3("Rotation (rad)",  &renderCamera.rotation.x, 0.02f);
+                ImGui::EndMenu();
+            }
+
+            // ---- Scene menu (Global UI: swap between loaded scenes) ----
+            if (ImGui::BeginMenu("Scene"))
+            {
+                ImGui::SeparatorText("Switch Scene");
+                ImGui::TextDisabled("(Global: all peers will switch)");
+                ImGui::Separator();
+
+                const int currentIdx = scenarios.CurrentIndex();
+                for (int si = 0; si < scenarios.Count(); ++si)
+                {
+                    const bool selected = (si == currentIdx);
+                    if (ImGui::MenuItem(scenarios.Get(si)->Name(),
+                                        nullptr, selected))
+                    {
+                        if (si != currentIdx)
+                            shared.requestedSceneIndex.store(
+                                si, std::memory_order_release);
+                    }
+                }
+
+                ImGui::Separator();
+                const bool grav = shared.gravityOn.load(std::memory_order_relaxed);
+                ImGui::Text("Gravity: %s", grav ? "ON" : "OFF");
+
                 ImGui::EndMenu();
             }
 

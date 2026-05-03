@@ -10,8 +10,8 @@ inline void PositionalCorrection(
     RigidBody& A,
     RigidBody& B,
     const CollisionManifold& m,
-    float percent = 0.8f,   // 80% of penetration
-    float slop = 0.001f)    // small allowance
+    float percent = 0.3f,   // 80% of penetration
+    float slop = 0.01f)    // small allowance
 {
     if (!m.hit) return;
 

@@ -20,14 +20,11 @@ public:
             {
                 if (phys.initialized) return;
 
-                // ---- Sync Transform -> RigidBody ----
                 phys.body.SetPosition(tr.position);
 
-                // Convert Euler (stored in Transform) -> quaternion
                 glm::quat q = glm::quat(tr.rotation);
                 phys.body.SetOrientation(q);
 
-                // ---- Setup body from ShapeComponent if available ----
                 if (auto* shape = world.getComponent<ShapeComponent>(e))
                 {
                     std::visit([&](auto&& s)
@@ -35,28 +32,31 @@ public:
                             using T = std::decay_t<decltype(s)>;
 
                             if constexpr (std::is_same_v<T, SphereShape>)
-                            {
                                 SetupSphereBody(phys.body, phys.density, s.radius);
-                            }
                             else if constexpr (std::is_same_v<T, CuboidShape>)
-                            {
                                 SetupCuboidBody(phys.body, phys.density, s.size);
-                            }
                             else if constexpr (std::is_same_v<T, CylinderShape>)
-                            {
                                 SetupCylinderBody(phys.body, phys.density, s.radius, s.height);
-                            }
                             else if constexpr (std::is_same_v<T, CapsuleShape>)
-                            {
                                 SetupCapsuleBody(phys.body, phys.density, s.radius, s.height);
-                            }
                             else if constexpr (std::is_same_v<T, PlaneShape>)
-                            {
                                 SetStaticBody(phys.body);
-                            }
 
                         }, shape->shape);
                 }
+
+                // >>> INSERT DAMPING HERE <<<
+                if (phys.body.IsDynamic())
+                {
+                    phys.body.SetLinearDamping(0.03f);
+                    phys.body.SetAngularDamping(0.08f);
+                }
+                else
+                {
+                    phys.body.SetLinearDamping(0.0f);
+                    phys.body.SetAngularDamping(0.0f);
+                }
+
                 phys.initialized = true;
             });
 

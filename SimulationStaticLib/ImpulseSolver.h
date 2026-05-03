@@ -14,6 +14,9 @@ struct ContactMaterial
     float dynamicFriction = 0.3f;
 };
 
+// Resting contact threshold (m/s). Below this, restitution is disabled to avoid jitter.
+static constexpr float kRestitutionVelocityThreshold = 0.5f;
+
 inline glm::vec3 VelocityAtPoint(const RigidBody& b, const glm::vec3& worldPoint)
 {
     const glm::vec3 r = worldPoint - b.Position();
@@ -28,7 +31,6 @@ inline void SolveContactImpulse(
 {
     if (!m.hit) return;
 
-    // If neither is dynamic, nothing should change.
     if (!A.IsDynamic() && !B.IsDynamic()) return;
 
     const float invMassA = A.EffectiveInverseMass();
@@ -49,7 +51,9 @@ inline void SolveContactImpulse(
     const float velAlongNormal = glm::dot(rv, n);
     if (velAlongNormal > 0.0f) return;
 
-    const float e = std::clamp(mat.restitution, 0.0f, 1.0f);
+    float e = std::clamp(mat.restitution, 0.0f, 1.0f);
+    if (std::abs(velAlongNormal) < kRestitutionVelocityThreshold)
+        e = 0.0f;
 
     // ---- Normal impulse ----
     const glm::vec3 raXn = glm::cross(ra, n);

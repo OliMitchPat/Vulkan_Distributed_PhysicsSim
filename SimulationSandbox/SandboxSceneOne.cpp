@@ -427,6 +427,12 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         "assets/scenes/newtonsCradle.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
         "assets/scenes/bouncingBalls.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
+		"assets/scenes/piston.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
+        "assets/scenes/sphereSpawners.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
+        "assets/scenes/tumbler.bin"));
     if (scenarios.Count() > 0)
         scenarios.SwitchTo(world, 0);
 

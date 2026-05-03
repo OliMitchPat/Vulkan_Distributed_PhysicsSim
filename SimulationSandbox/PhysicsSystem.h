@@ -1,6 +1,8 @@
 #include "World.h"
 #include "Components.h"
-#include "RigidBody.h" 
+#include "RigidBody.h"
+
+#include <glm/gtc/quaternion.hpp>
 
 class PhysicsSystem
 {
@@ -18,12 +20,14 @@ public:
                     phys.body.AddForce(gravity * phys.body.Mass());
             });
 
-        // 2. Integrate AFTER collision resolution
+        // 2. Integrate and sync pose back to TransformComponent
         world.forEach<TransformComponent, PhysicsComponent>(
             [&](Entity, TransformComponent& tr, PhysicsComponent& phys)
             {
                 phys.body.Integrate(dt, m_integrator);
                 tr.position = phys.body.Position();
+                // Sync orientation so the renderer sees up-to-date rotation
+                tr.rotation = glm::eulerAngles(phys.body.Orientation());
             });
     }
 

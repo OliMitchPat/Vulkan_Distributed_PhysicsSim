@@ -6,19 +6,15 @@
 #include "Components.h"
 
 #include "WorldShapes.h"
-#include "BuildWorldShapes.h"
+#include "BuildWorldShapes.h"   // also pulls in Sphere.h, Plane.h, Capsule.h, Cylinder.h, Cuboid.h
 #include "Intersect.h"
+#include "Containment.h"
 #include "ResolveContact.h"
 #include "Transform.h"
-#include "Sphere.h"
-#include "Plane.h"
-#include "Capsule.h"
-#include "Cylinder.h"
-#include "Cuboid.h"
-#include "ShapeData.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <variant>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -29,33 +25,16 @@ public:
     void Update(World& world)
     {
         m_contacts.clear();
-        m_spheres.clear();
-        m_planes.clear();
-        m_capsules.clear();
-        m_cylinders.clear();
-        m_obbs.clear();
+        m_solids.clear();
+        m_containers.clear();
 
         GatherShapes(world);
 
-        // --- Sphere pairs ---
-        TestSphereSphere();
-        TestSpherePlane();
-        TestSphereOBB();
-        TestSphereCapsule();
-        TestSphereCylinder();
+        // --- SOLID vs SOLID (Intersect) ---
+        TestSolidSolid();
 
-        // --- Other vs Plane ---
-        TestOBBPlane();
-        TestCapsulePlane();
-        TestCylinderPlane();
-
-        // --- Dynamic-dynamic non-sphere demo ---
-        TestOBBOBB();
-        TestCapsuleCapsule();
-        TestCapsuleOBB();
-        TestCapsuleCylinder();
-        TestCylinderOBB();
-        TestCylinderCylinder();
+        // --- SOLID vs CONTAINER (Contain) ---
+        TestSolidContainer();
 
         // Solve contacts (velocity impulses)
         const int iterations = 8;
@@ -72,25 +51,46 @@ private:
     // ---- Per-body metadata carried alongside each world shape ----
     struct BodyRef
     {
-        RigidBody*  body        = nullptr;
-        float restitution       = 0.5f;
-        float staticFriction    = 0.5f;
-        float dynamicFriction   = 0.3f;
+        RigidBody*  body          = nullptr;
+        float restitution         = 0.5f;
+        float staticFriction      = 0.5f;
+        float dynamicFriction     = 0.3f;
     };
 
-    struct SphereEntry   { BodyRef br; WorldSphere   ws; };
-    struct PlaneEntry    { BodyRef br; WorldPlane    wp; };
-    struct CapsuleEntry  { BodyRef br; WorldCapsule  wc; };
-    struct CylinderEntry { BodyRef br; WorldCylinder wy; };
-    struct OBBEntry      { BodyRef br; WorldOBB      wo; };
+    // Discriminated union of all world shape types, carrying the BodyRef.
+    enum class ShapeKind { Sphere, Plane, Capsule, Cylinder, OBB };
 
-    std::vector<SphereEntry>   m_spheres;
-    std::vector<PlaneEntry>    m_planes;
-    std::vector<CapsuleEntry>  m_capsules;
-    std::vector<CylinderEntry> m_cylinders;
-    std::vector<OBBEntry>      m_obbs;
+    struct AnyShape
+    {
+        ShapeKind kind;
+        BodyRef   br;
+        union
+        {
+            WorldSphere   sphere;
+            WorldPlane    plane;
+            WorldCapsule  capsule;
+            WorldCylinder cylinder;
+            WorldOBB      obb;
+        };
 
-    // Persistent static body used for plane entities that have no PhysicsComponent.
+        AnyShape() {}  // union requires manual construction
+
+        static AnyShape MakeSphere  (const BodyRef& br, const WorldSphere&   ws)
+            { AnyShape s; s.kind = ShapeKind::Sphere;   s.br = br; s.sphere   = ws; return s; }
+        static AnyShape MakePlane   (const BodyRef& br, const WorldPlane&    wp)
+            { AnyShape s; s.kind = ShapeKind::Plane;    s.br = br; s.plane    = wp; return s; }
+        static AnyShape MakeCapsule (const BodyRef& br, const WorldCapsule&  wc)
+            { AnyShape s; s.kind = ShapeKind::Capsule;  s.br = br; s.capsule  = wc; return s; }
+        static AnyShape MakeCylinder(const BodyRef& br, const WorldCylinder& wy)
+            { AnyShape s; s.kind = ShapeKind::Cylinder; s.br = br; s.cylinder = wy; return s; }
+        static AnyShape MakeOBB     (const BodyRef& br, const WorldOBB&      wo)
+            { AnyShape s; s.kind = ShapeKind::OBB;      s.br = br; s.obb      = wo; return s; }
+    };
+
+    std::vector<AnyShape> m_solids;
+    std::vector<AnyShape> m_containers;
+
+    // Persistent static body used for plane entities without PhysicsComponent.
     RigidBody m_staticBody;
 
     // ---- Contact cache ----
@@ -107,7 +107,6 @@ private:
     // Helpers
     // =========================================================
 
-    // Max-abs uniform scale (Option A from spec).
     static float UniformScale(const TransformComponent& tr)
     {
         return std::max({ std::abs(tr.scale.x),
@@ -115,24 +114,19 @@ private:
                           std::abs(tr.scale.z) });
     }
 
-    // Build a StaticLib Transform from body pose (used for ShapeComponent path).
-    // Shape dimensions are already world-scaled, so uniformScale = 1.
-    static Transform BodyTransform(const RigidBody& body)
-    {
-        return Transform(body.Position(),
-                         glm::mat3_cast(body.Orientation()),
-                         1.0f);
-    }
-
-    // Build a StaticLib Transform with explicit uniform scale (legacy collider path).
-    static Transform BodyTransformScaled(const RigidBody& body, float uniformScale)
+    static Transform BodyTransform(const RigidBody& body, float uniformScale = 1.0f)
     {
         return Transform(body.Position(),
                          glm::mat3_cast(body.Orientation()),
                          uniformScale);
     }
 
-    // Combine materials from two BodyRefs into a ContactMaterial.
+    // Apply a local-center offset rotated by body orientation to world position.
+    static glm::vec3 WorldCenter(const RigidBody& body, const glm::vec3& localCenter)
+    {
+        return body.Position() + glm::mat3_cast(body.Orientation()) * localCenter;
+    }
+
     static ContactMaterial CombineMaterial(const BodyRef& a, const BodyRef& b)
     {
         ContactMaterial mat{};
@@ -150,11 +144,6 @@ private:
         m_contacts.push_back({ A, B, m, CombineMaterial(brA, brB) });
     }
 
-    // =========================================================
-    // Shape gathering
-    // =========================================================
-
-    // Fill BodyRef from a PhysicsComponent (or use static defaults).
     static BodyRef MakeBodyRef(RigidBody& body, PhysicsComponent* phys)
     {
         BodyRef br{};
@@ -168,10 +157,22 @@ private:
         return br;
     }
 
+    // Push a shape into either solids or containers depending on collision type.
+    void AddShape(AnyShape&& shape, CollisionType type)
+    {
+        if (type == CollisionType::CONTAINER)
+            m_containers.push_back(std::move(shape));
+        else
+            m_solids.push_back(std::move(shape));
+    }
+
+    // =========================================================
+    // Shape gathering
+    // =========================================================
+
     void GatherShapes(World& world)
     {
         // --- Path 1: ShapeComponent (FlatBuffer scene) ---
-        // Shape dimensions are already multiplied by uniformScale in ScaleShape().
         world.forEach<ShapeComponent, PhysicsComponent>(
             [&](Entity /*e*/,
                 ShapeComponent& sc,
@@ -179,66 +180,47 @@ private:
             {
                 const Transform physTr = BodyTransform(phys.body);
                 const BodyRef   br     = MakeBodyRef(phys.body, &phys);
+                const CollisionType ct = sc.collisionType;
 
                 std::visit([&](auto&& shape)
                 {
                     using T = std::decay_t<decltype(shape)>;
 
                     if constexpr (std::is_same_v<T, SphereShape>)
-                    {
-                        m_spheres.push_back({ br,
-                            BuildWorldSphere(physTr, shape) });
-                    }
+                        AddShape(AnyShape::MakeSphere(br, BuildWorldSphere(physTr, shape)), ct);
                     else if constexpr (std::is_same_v<T, PlaneShape>)
-                    {
-                        m_planes.push_back({ br,
-                            BuildWorldPlane(physTr, shape) });
-                    }
+                        AddShape(AnyShape::MakePlane(br, BuildWorldPlane(physTr, shape)), ct);
                     else if constexpr (std::is_same_v<T, CapsuleShape>)
-                    {
-                        m_capsules.push_back({ br,
-                            BuildWorldCapsule(physTr, Capsule{ shape.radius, shape.height }) });
-                    }
+                        AddShape(AnyShape::MakeCapsule(br,
+                            BuildWorldCapsule(physTr, Capsule{ shape.radius, shape.height })), ct);
                     else if constexpr (std::is_same_v<T, CylinderShape>)
-                    {
-                        m_cylinders.push_back({ br,
-                            BuildWorldCylinder(physTr, Cylinder{ shape.radius, shape.height }) });
-                    }
+                        AddShape(AnyShape::MakeCylinder(br,
+                            BuildWorldCylinder(physTr, Cylinder{ shape.radius, shape.height })), ct);
                     else if constexpr (std::is_same_v<T, CuboidShape>)
-                    {
-                        m_obbs.push_back({ br,
-                            BuildWorldOBB(physTr, Cuboid{ shape.size }) });
-                    }
+                        AddShape(AnyShape::MakeOBB(br,
+                            BuildWorldOBB(physTr, Cuboid{ shape.size })), ct);
                 }, sc.shape);
             });
 
         // --- Path 2: legacy specific-collider components (PrimitiveScene) ---
 
-        // Sphere
+        // Sphere (always SOLID in legacy scenes)
         world.forEach<SphereColliderComponent, PhysicsComponent>(
             [&](Entity e,
                 SphereColliderComponent& sc,
                 PhysicsComponent& phys)
             {
-                // Skip if already handled via ShapeComponent
                 if (world.getComponent<ShapeComponent>(e)) return;
-
                 auto* tr = world.getComponent<TransformComponent>(e);
                 const float uScale = tr ? UniformScale(*tr) : 1.0f;
                 const BodyRef br = MakeBodyRef(phys.body, &phys);
 
-                // Apply localCenter offset rotated by body orientation
-                const glm::vec3 worldCenter =
-                    phys.body.Position() +
-                    glm::mat3_cast(phys.body.Orientation()) * sc.localCenter;
-
-                WorldSphere ws{};
-                ws.center = worldCenter;
-                ws.radius  = sc.baseRadius * uScale;
-                m_spheres.push_back({ br, ws });
+                const glm::vec3 worldCenter = WorldCenter(phys.body, sc.localCenter);
+                WorldSphere ws{ worldCenter, sc.baseRadius * uScale };
+                m_solids.push_back(AnyShape::MakeSphere(br, ws));
             });
 
-        // Plane with PhysicsComponent (legacy dynamic planes, unlikely but handled)
+        // Plane with PhysicsComponent (legacy, always SOLID)
         world.forEach<PlaneColliderComponent, PhysicsComponent>(
             [&](Entity e,
                 PlaneColliderComponent& pc,
@@ -247,29 +229,21 @@ private:
                 if (world.getComponent<ShapeComponent>(e)) return;
                 WorldPlane wp{};
                 wp.point  = phys.body.Position();
-                wp.normal = glm::normalize(
-                    glm::mat3_cast(phys.body.Orientation()) * pc.normal);
-                const BodyRef br = MakeBodyRef(phys.body, &phys);
-                m_planes.push_back({ br, wp });
+                wp.normal = glm::normalize(glm::mat3_cast(phys.body.Orientation()) * pc.normal);
+                m_solids.push_back(AnyShape::MakePlane(MakeBodyRef(phys.body, &phys), wp));
             });
 
-        // Static plane (no PhysicsComponent) — most common in PrimitiveScene
+        // Static plane (no PhysicsComponent)
         m_staticBody.SetMotionType(BodyMotionType::Static);
         world.forEach<TransformComponent, PlaneColliderComponent>(
             [&](Entity e, TransformComponent& tr, PlaneColliderComponent& pc)
             {
-                // Only add once per entity — skip if this entity also has PhysicsComponent
                 if (world.getComponent<PhysicsComponent>(e)) return;
-
-                WorldPlane wp{};
-                wp.point  = tr.position;
-                wp.normal = glm::normalize(pc.normal);
-
-                BodyRef br = MakeBodyRef(m_staticBody, nullptr);
-                m_planes.push_back({ br, wp });
+                WorldPlane wp{ tr.position, glm::normalize(pc.normal) };
+                m_solids.push_back(AnyShape::MakePlane(MakeBodyRef(m_staticBody, nullptr), wp));
             });
 
-        // Cuboid (legacy)
+        // Cuboid (legacy, SOLID)
         world.forEach<CuboidColliderComponent, PhysicsComponent>(
             [&](Entity e,
                 CuboidColliderComponent& cc,
@@ -278,15 +252,18 @@ private:
                 if (world.getComponent<ShapeComponent>(e)) return;
                 auto* tr = world.getComponent<TransformComponent>(e);
                 const float uScale = tr ? UniformScale(*tr) : 1.0f;
-                const Transform physTr = BodyTransformScaled(phys.body, uScale);
-                const BodyRef   br     = MakeBodyRef(phys.body, &phys);
+                const BodyRef br = MakeBodyRef(phys.body, &phys);
 
-                // halfExtents -> full size for Cuboid
+                // Build a synthetic body at the local-center offset position
+                const glm::vec3 centerWorld = WorldCenter(phys.body, cc.localCenter);
+                const Transform physTr(centerWorld,
+                                       glm::mat3_cast(phys.body.Orientation()),
+                                       uScale);
                 Cuboid cub{ cc.halfExtents * 2.0f };
-                m_obbs.push_back({ br, BuildWorldOBB(physTr, cub) });
+                m_solids.push_back(AnyShape::MakeOBB(br, BuildWorldOBB(physTr, cub)));
             });
 
-        // Cylinder (legacy)
+        // Cylinder (legacy, SOLID)
         world.forEach<CylinderColliderComponent, PhysicsComponent>(
             [&](Entity e,
                 CylinderColliderComponent& cc,
@@ -295,14 +272,17 @@ private:
                 if (world.getComponent<ShapeComponent>(e)) return;
                 auto* tr = world.getComponent<TransformComponent>(e);
                 const float uScale = tr ? UniformScale(*tr) : 1.0f;
-                const Transform physTr = BodyTransformScaled(phys.body, uScale);
-                const BodyRef   br     = MakeBodyRef(phys.body, &phys);
+                const BodyRef br = MakeBodyRef(phys.body, &phys);
 
-                Cylinder cyl{ cc.radius, cc.height };
-                m_cylinders.push_back({ br, BuildWorldCylinder(physTr, cyl) });
+                const glm::vec3 centerWorld = WorldCenter(phys.body, cc.localCenter);
+                const Transform physTr(centerWorld,
+                                       glm::mat3_cast(phys.body.Orientation()),
+                                       uScale);
+                m_solids.push_back(AnyShape::MakeCylinder(br,
+                    BuildWorldCylinder(physTr, Cylinder{ cc.radius, cc.height })));
             });
 
-        // Capsule (legacy)
+        // Capsule (legacy, SOLID)
         world.forEach<CapsuleColliderComponent, PhysicsComponent>(
             [&](Entity e,
                 CapsuleColliderComponent& cc,
@@ -311,142 +291,176 @@ private:
                 if (world.getComponent<ShapeComponent>(e)) return;
                 auto* tr = world.getComponent<TransformComponent>(e);
                 const float uScale = tr ? UniformScale(*tr) : 1.0f;
-                const Transform physTr = BodyTransformScaled(phys.body, uScale);
-                const BodyRef   br     = MakeBodyRef(phys.body, &phys);
+                const BodyRef br = MakeBodyRef(phys.body, &phys);
 
-                Capsule cap{ cc.radius, cc.height };
-                m_capsules.push_back({ br, BuildWorldCapsule(physTr, cap) });
+                const glm::vec3 centerWorld = WorldCenter(phys.body, cc.localCenter);
+                const Transform physTr(centerWorld,
+                                       glm::mat3_cast(phys.body.Orientation()),
+                                       uScale);
+                m_solids.push_back(AnyShape::MakeCapsule(br,
+                    BuildWorldCapsule(physTr, Capsule{ cc.radius, cc.height })));
             });
     }
 
     // =========================================================
-    // Collision pair tests
+    // SOLID vs SOLID dispatch (uses Intersect)
     // =========================================================
 
-    void TestSphereSphere()
+    void TestSolidSolid()
     {
-        for (std::size_t i = 0; i < m_spheres.size(); ++i)
-            for (std::size_t j = i + 1; j < m_spheres.size(); ++j)
-                PushContact(m_spheres[i].br.body, m_spheres[j].br.body,
-                            Intersect(m_spheres[i].ws, m_spheres[j].ws),
-                            m_spheres[i].br, m_spheres[j].br);
+        for (std::size_t i = 0; i < m_solids.size(); ++i)
+        {
+            for (std::size_t j = i + 1; j < m_solids.size(); ++j)
+            {
+                PushContact(m_solids[i].br.body, m_solids[j].br.body,
+                            IntersectSolids(m_solids[i], m_solids[j]),
+                            m_solids[i].br, m_solids[j].br);
+            }
+        }
     }
 
-    void TestSpherePlane()
+    // =========================================================
+    // SOLID vs CONTAINER dispatch (uses Contain)
+    // =========================================================
+
+    void TestSolidContainer()
     {
-        for (auto& se : m_spheres)
-            for (auto& pe : m_planes)
-                PushContact(se.br.body, pe.br.body,
-                            Intersect(se.ws, pe.wp),
-                            se.br, pe.br);
+        for (auto& solid : m_solids)
+        {
+            for (auto& container : m_containers)
+            {
+                // We pass: solid as the "object being contained", container as the "container"
+                // The manifold normal from Contain() points inward (push the solid back in).
+                // We use solid.br.body as A and container.br.body as B.
+                PushContact(solid.br.body, container.br.body,
+                            ContainInContainer(solid, container),
+                            solid.br, container.br);
+            }
+        }
     }
 
-    void TestSphereOBB()
+    // =========================================================
+    // Dispatch helpers
+    // =========================================================
+
+    static CollisionManifold IntersectSolids(const AnyShape& a, const AnyShape& b)
     {
-        for (auto& se : m_spheres)
-            for (auto& oe : m_obbs)
-                PushContact(se.br.body, oe.br.body,
-                            Intersect(se.ws, oe.wo),
-                            se.br, oe.br);
+        // All 16 pairs available in Intersect.h
+        switch (a.kind)
+        {
+        case ShapeKind::Sphere:
+            switch (b.kind)
+            {
+            case ShapeKind::Sphere:   return Intersect(a.sphere,   b.sphere);
+            case ShapeKind::Plane:    return Intersect(a.sphere,   b.plane);
+            case ShapeKind::OBB:      return Intersect(a.sphere,   b.obb);
+            case ShapeKind::Capsule:  return Intersect(a.sphere,   b.capsule);
+            case ShapeKind::Cylinder: return Intersect(a.sphere,   b.cylinder);
+            }
+            break;
+        case ShapeKind::Plane:
+            switch (b.kind)
+            {
+            case ShapeKind::Sphere:   return FlipNormal(Intersect(b.sphere,   a.plane));
+            case ShapeKind::OBB:      return FlipNormal(Intersect(b.obb,      a.plane));
+            case ShapeKind::Capsule:  return FlipNormal(Intersect(b.capsule,  a.plane));
+            case ShapeKind::Cylinder: return FlipNormal(Intersect(b.cylinder, a.plane));
+            case ShapeKind::Plane:    return {}; // plane vs plane not meaningful
+            }
+            break;
+        case ShapeKind::OBB:
+            switch (b.kind)
+            {
+            case ShapeKind::Sphere:   return FlipNormal(Intersect(b.sphere,   a.obb));
+            case ShapeKind::Plane:    return Intersect(a.obb,      b.plane);
+            case ShapeKind::OBB:      return Intersect(a.obb,      b.obb);
+            case ShapeKind::Capsule:  return FlipNormal(Intersect(b.capsule,  a.obb));
+            case ShapeKind::Cylinder: return FlipNormal(Intersect(b.cylinder, a.obb));
+            }
+            break;
+        case ShapeKind::Capsule:
+            switch (b.kind)
+            {
+            case ShapeKind::Sphere:   return FlipNormal(Intersect(b.sphere,   a.capsule));
+            case ShapeKind::Plane:    return Intersect(a.capsule,  b.plane);
+            case ShapeKind::OBB:      return Intersect(a.capsule,  b.obb);
+            case ShapeKind::Capsule:  return Intersect(a.capsule,  b.capsule);
+            case ShapeKind::Cylinder: return Intersect(a.capsule,  b.cylinder);
+            }
+            break;
+        case ShapeKind::Cylinder:
+            switch (b.kind)
+            {
+            case ShapeKind::Sphere:   return FlipNormal(Intersect(b.sphere,   a.cylinder));
+            case ShapeKind::Plane:    return Intersect(a.cylinder, b.plane);
+            case ShapeKind::OBB:      return Intersect(a.cylinder, b.obb);
+            case ShapeKind::Capsule:  return FlipNormal(Intersect(b.capsule,  a.cylinder));
+            case ShapeKind::Cylinder: return Intersect(a.cylinder, b.cylinder);
+            }
+            break;
+        }
+        return {};
     }
 
-    void TestSphereCapsule()
+    // Dispatch solid vs container using Contain().
+    // The 'inner' is the solid (must stay inside), 'outer' is the container.
+    static CollisionManifold ContainInContainer(const AnyShape& inner, const AnyShape& outer)
     {
-        for (auto& se : m_spheres)
-            for (auto& ce : m_capsules)
-                PushContact(se.br.body, ce.br.body,
-                            Intersect(se.ws, ce.wc),
-                            se.br, ce.br);
+        switch (outer.kind)
+        {
+        case ShapeKind::Sphere:
+            switch (inner.kind)
+            {
+            case ShapeKind::Sphere:   return Contain(inner.sphere,   outer.sphere);
+            case ShapeKind::Capsule:  return Contain(inner.capsule,  outer.sphere);
+            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.sphere);
+            case ShapeKind::OBB:      return Contain(inner.obb,      outer.sphere);
+            default: break;
+            }
+            break;
+        case ShapeKind::OBB:
+            switch (inner.kind)
+            {
+            case ShapeKind::Sphere:   return Contain(inner.sphere,   outer.obb);
+            case ShapeKind::Capsule:  return Contain(inner.capsule,  outer.obb);
+            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.obb);
+            case ShapeKind::OBB:      return Contain(inner.obb,      outer.obb);
+            default: break;
+            }
+            break;
+        case ShapeKind::Cylinder:
+            switch (inner.kind)
+            {
+            case ShapeKind::Sphere:   return Contain(inner.sphere,   outer.cylinder);
+            case ShapeKind::Capsule:  return Contain(inner.capsule,  outer.cylinder);
+            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.cylinder);
+            case ShapeKind::OBB:      return Contain(inner.obb,      outer.cylinder);
+            default: break;
+            }
+            break;
+        case ShapeKind::Plane:
+            // Plane container = half-space; keep solid on the negative-normal side.
+            switch (inner.kind)
+            {
+            case ShapeKind::Sphere:   return Contain(inner.sphere,   outer.plane);
+            case ShapeKind::Capsule:  return Contain(inner.capsule,  outer.plane);
+            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.plane);
+            case ShapeKind::OBB:      return Contain(inner.obb,      outer.plane);
+            default: break;
+            }
+            break;
+        default:
+            break;
+        }
+        return {};
     }
 
-    void TestSphereCylinder()
+    // Flip normal and contact-point so "A/B" assignment stays consistent
+    // after we used a reversed argument order to Intersect.
+    static CollisionManifold FlipNormal(CollisionManifold m)
     {
-        for (auto& se : m_spheres)
-            for (auto& ye : m_cylinders)
-                PushContact(se.br.body, ye.br.body,
-                            Intersect(se.ws, ye.wy),
-                            se.br, ye.br);
-    }
-
-    void TestOBBPlane()
-    {
-        for (auto& oe : m_obbs)
-            for (auto& pe : m_planes)
-                PushContact(oe.br.body, pe.br.body,
-                            Intersect(oe.wo, pe.wp),
-                            oe.br, pe.br);
-    }
-
-    void TestCapsulePlane()
-    {
-        for (auto& ce : m_capsules)
-            for (auto& pe : m_planes)
-                PushContact(ce.br.body, pe.br.body,
-                            Intersect(ce.wc, pe.wp),
-                            ce.br, pe.br);
-    }
-
-    void TestCylinderPlane()
-    {
-        for (auto& ye : m_cylinders)
-            for (auto& pe : m_planes)
-                PushContact(ye.br.body, pe.br.body,
-                            Intersect(ye.wy, pe.wp),
-                            ye.br, pe.br);
-    }
-
-    void TestOBBOBB()
-    {
-        for (std::size_t i = 0; i < m_obbs.size(); ++i)
-            for (std::size_t j = i + 1; j < m_obbs.size(); ++j)
-                PushContact(m_obbs[i].br.body, m_obbs[j].br.body,
-                            Intersect(m_obbs[i].wo, m_obbs[j].wo),
-                            m_obbs[i].br, m_obbs[j].br);
-    }
-
-    void TestCapsuleCapsule()
-    {
-        for (std::size_t i = 0; i < m_capsules.size(); ++i)
-            for (std::size_t j = i + 1; j < m_capsules.size(); ++j)
-                PushContact(m_capsules[i].br.body, m_capsules[j].br.body,
-                            Intersect(m_capsules[i].wc, m_capsules[j].wc),
-                            m_capsules[i].br, m_capsules[j].br);
-    }
-
-    void TestCapsuleOBB()
-    {
-        for (auto& ce : m_capsules)
-            for (auto& oe : m_obbs)
-                PushContact(ce.br.body, oe.br.body,
-                            Intersect(ce.wc, oe.wo),
-                            ce.br, oe.br);
-    }
-
-    void TestCapsuleCylinder()
-    {
-        for (auto& ce : m_capsules)
-            for (auto& ye : m_cylinders)
-                PushContact(ce.br.body, ye.br.body,
-                            Intersect(ce.wc, ye.wy),
-                            ce.br, ye.br);
-    }
-
-    void TestCylinderOBB()
-    {
-        for (auto& ye : m_cylinders)
-            for (auto& oe : m_obbs)
-                PushContact(ye.br.body, oe.br.body,
-                            Intersect(ye.wy, oe.wo),
-                            ye.br, oe.br);
-    }
-
-    void TestCylinderCylinder()
-    {
-        for (std::size_t i = 0; i < m_cylinders.size(); ++i)
-            for (std::size_t j = i + 1; j < m_cylinders.size(); ++j)
-                PushContact(m_cylinders[i].br.body, m_cylinders[j].br.body,
-                            Intersect(m_cylinders[i].wy, m_cylinders[j].wy),
-                            m_cylinders[i].br, m_cylinders[j].br);
+        if (m.hit) m.normal = -m.normal;
+        return m;
     }
 
     // =========================================================

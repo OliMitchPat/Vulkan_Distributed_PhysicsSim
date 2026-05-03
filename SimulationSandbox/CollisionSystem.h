@@ -192,13 +192,13 @@ private:
                         AddShape(AnyShape::MakePlane(br, BuildWorldPlane(physTr, shape)), ct);
                     else if constexpr (std::is_same_v<T, CapsuleShape>)
                         AddShape(AnyShape::MakeCapsule(br,
-                            BuildWorldCapsule(physTr, Capsule{ shape.radius, shape.height })), ct);
+                            BuildWorldCapsule(physTr, CapsuleShape{ shape.radius, shape.height })), ct);
                     else if constexpr (std::is_same_v<T, CylinderShape>)
                         AddShape(AnyShape::MakeCylinder(br,
-                            BuildWorldCylinder(physTr, Cylinder{ shape.radius, shape.height })), ct);
+                            BuildWorldCylinder(physTr, CylinderShape{ shape.radius, shape.height })), ct);
                     else if constexpr (std::is_same_v<T, CuboidShape>)
                         AddShape(AnyShape::MakeOBB(br,
-                            BuildWorldOBB(physTr, Cuboid{ shape.size })), ct);
+                            BuildWorldOBB(physTr, CuboidShape{ shape.size })), ct);
                 }, sc.shape);
             });
 
@@ -259,7 +259,7 @@ private:
                 const Transform physTr(centerWorld,
                                        glm::mat3_cast(phys.body.Orientation()),
                                        uScale);
-                Cuboid cub{ cc.halfExtents * 2.0f };
+                CuboidShape cub{ cc.halfExtents * 2.0f };
                 m_solids.push_back(AnyShape::MakeOBB(br, BuildWorldOBB(physTr, cub)));
             });
 
@@ -279,7 +279,7 @@ private:
                                        glm::mat3_cast(phys.body.Orientation()),
                                        uScale);
                 m_solids.push_back(AnyShape::MakeCylinder(br,
-                    BuildWorldCylinder(physTr, Cylinder{ cc.radius, cc.height })));
+                    BuildWorldCylinder(physTr, CylinderShape{ cc.radius, cc.height })));
             });
 
         // Capsule (legacy, SOLID)
@@ -298,7 +298,7 @@ private:
                                        glm::mat3_cast(phys.body.Orientation()),
                                        uScale);
                 m_solids.push_back(AnyShape::MakeCapsule(br,
-                    BuildWorldCapsule(physTr, Capsule{ cc.radius, cc.height })));
+                    BuildWorldCapsule(physTr, CapsuleShape{ cc.radius, cc.height })));
             });
     }
 

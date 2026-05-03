@@ -345,7 +345,9 @@ private:
 
     static CollisionManifold IntersectSolids(const AnyShape& a, const AnyShape& b)
     {
-        // All 16 pairs available in Intersect.h
+        // All 25 pairs (5 shapes × 5 shapes) covered below.
+        // Pairs where the canonical Intersect() overload takes (B, A) order are routed
+        // with FlipNormal() so the manifold normal always points from A toward B.
         switch (a.kind)
         {
         case ShapeKind::Sphere:

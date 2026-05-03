@@ -25,8 +25,16 @@ public:
             [&](Entity, TransformComponent& tr, PhysicsComponent& phys)
             {
                 phys.body.Integrate(dt, m_integrator);
+
+                // Sync position and orientation back to TransformComponent each frame so
+                // the renderer (which builds a model matrix from tr.position / tr.rotation)
+                // reflects the authoritative physics pose.
+                // Note: converting a quaternion to Euler angles can exhibit gimbal lock
+                // when pitch approaches ±90°.  TransformComponent stores Euler (YXZ)
+                // purely because the existing renderer pipeline uses them; a future
+                // refactor that stores a quaternion in TransformComponent would remove
+                // this limitation.
                 tr.position = phys.body.Position();
-                // Sync orientation so the renderer sees up-to-date rotation
                 tr.rotation = glm::eulerAngles(phys.body.Orientation());
             });
     }

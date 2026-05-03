@@ -10,8 +10,7 @@
 #include "Intersect.h"
 #include "ResolveContact.h"
 #include "Transform.h"
-#include "Sphere.h"
-#include "Plane.h"
+#include "ShapeData.h"
 
 #include <glm/glm.hpp>
 #include <vector>

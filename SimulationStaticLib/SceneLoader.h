@@ -81,4 +81,4 @@ namespace SimIO
         std::string              m_lastError;
     };
 
-} // namespace SimIO
+};

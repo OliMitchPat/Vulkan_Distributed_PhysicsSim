@@ -140,11 +140,8 @@
     <ClInclude Include="BodyDispatcher.h" />
     <ClInclude Include="BodySetUp.h" />
     <ClInclude Include="BuildWorldShapes.h" />
-    <ClInclude Include="Capsule.h" />
     <ClInclude Include="Containment.h" />
     <ClInclude Include="CollisionManifold.h" />
-    <ClInclude Include="Cuboid.h" />
-    <ClInclude Include="Cylinder.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="ImpulseSolver.h" />
     <ClInclude Include="Inertia.h" />
@@ -152,9 +149,7 @@
     <ClInclude Include="FlatbufferConvert.h" />
     <ClInclude Include="MathUtils.h" />
     <ClInclude Include="NotImplementedException.h" />
-    <ClInclude Include="Line.h" />
     <ClInclude Include="pch.h" />
-    <ClInclude Include="Plane.h" />
     <ClInclude Include="PositionalCorrection.h" />
     <ClInclude Include="ResolveContact.h" />
     <ClInclude Include="RigidBody.h" />
@@ -162,7 +157,6 @@
     <ClInclude Include="SetUpRigidBodyFromFlatbuffer.h" />
     <ClInclude Include="SceneLoader.h" />
     <ClInclude Include="ShapeData.h" />
-    <ClInclude Include="Sphere.h" />
     <ClInclude Include="Transform.h" />
     <ClInclude Include="Volume.h" />
     <ClInclude Include="WorldShapes.h" />

@@ -4,11 +4,7 @@
 #include "Transform.h"
 #include "MathUtils.h"
 
-#include "Sphere.h"
-#include "Cuboid.h"
-#include "Cylinder.h"
-#include "Capsule.h"
-#include "Plane.h"
+#include "ShapeData.h"
 
 #include <glm/glm.hpp>
 
@@ -33,7 +29,7 @@ inline WorldPlane BuildWorldPlane(const Transform& tr, const PlaneShape& p)
     return out;
 }
 
-inline WorldCapsule BuildWorldCapsule(const Transform& tr, const Capsule& c)
+inline WorldCapsule BuildWorldCapsule(const Transform& tr, const CapsuleShape& c)
 {
     WorldCapsule out{};
     out.radius = c.radius * tr.scale;
@@ -47,7 +43,7 @@ inline WorldCapsule BuildWorldCapsule(const Transform& tr, const Capsule& c)
     return out;
 }
 
-inline WorldCylinder BuildWorldCylinder(const Transform& tr, const Cylinder& c)
+inline WorldCylinder BuildWorldCylinder(const Transform& tr, const CylinderShape& c)
 {
     WorldCylinder out{};
     out.radius = c.radius * tr.scale;
@@ -60,7 +56,7 @@ inline WorldCylinder BuildWorldCylinder(const Transform& tr, const Cylinder& c)
     return out;
 }
 
-inline WorldOBB BuildWorldOBB(const Transform& tr, const Cuboid& b)
+inline WorldOBB BuildWorldOBB(const Transform& tr, const CuboidShape& b)
 {
     WorldOBB out{};
     out.center = tr.position;
@@ -71,6 +67,6 @@ inline WorldOBB BuildWorldOBB(const Transform& tr, const Cuboid& b)
     out.axisY = SafeNormalize(tr.rotation[1], glm::vec3(0, 1, 0));
     out.axisZ = SafeNormalize(tr.rotation[2], glm::vec3(0, 0, 1));
 
-    out.halfExtents = b.halfExtents() * tr.scale;
+    out.halfExtents = 0.5f * (b.size * tr.scale);
     return out;
 }

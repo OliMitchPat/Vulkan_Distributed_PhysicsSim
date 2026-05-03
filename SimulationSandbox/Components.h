@@ -77,19 +77,22 @@ struct PlaneColliderComponent
 
 struct CuboidColliderComponent
 {
-    glm::vec3 halfExtents{ 0.5f, 0.5f, 0.5f };  // half-size in each axis
+    glm::vec3 halfExtents{ 0.5f, 0.5f, 0.5f };  // half-size in each axis (baseSize / 2)
+    glm::vec3 localCenter{ 0.0f };               // offset of box center from entity origin
 };
 
 struct CylinderColliderComponent
 {
-    float radius = 0.5f;
-    float height = 1.0f;  // full height; aligned to local Y axis
+    float     radius = 0.5f;       // baseRadius
+    float     height = 1.0f;       // baseHeight; full height, aligned to local Y axis
+    glm::vec3 localCenter{ 0.0f }; // offset of cylinder midpoint from entity origin
 };
 
 struct CapsuleColliderComponent
 {
-    float radius = 0.5f;
-    float height = 1.0f;  // full height of the cylindrical segment; aligned to local Y axis
+    float     radius = 0.5f;       // baseRadius
+    float     height = 1.0f;       // baseHeight; full height of the cylindrical segment, local Y
+    glm::vec3 localCenter{ 0.0f }; // offset of capsule midpoint from entity origin
 };
 
 // --------------------------------------------------

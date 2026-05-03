@@ -1,6 +1,8 @@
 #include "World.h"
 #include "Components.h"
-#include "RigidBody.h" 
+#include "RigidBody.h"
+
+#include <glm/gtc/quaternion.hpp>
 
 class PhysicsSystem
 {
@@ -18,12 +20,22 @@ public:
                     phys.body.AddForce(gravity * phys.body.Mass());
             });
 
-        // 2. Integrate AFTER collision resolution
+        // 2. Integrate and sync pose back to TransformComponent
         world.forEach<TransformComponent, PhysicsComponent>(
             [&](Entity, TransformComponent& tr, PhysicsComponent& phys)
             {
                 phys.body.Integrate(dt, m_integrator);
+
+                // Sync position and orientation back to TransformComponent each frame so
+                // the renderer (which builds a model matrix from tr.position / tr.rotation)
+                // reflects the authoritative physics pose.
+                // Note: converting a quaternion to Euler angles can exhibit gimbal lock
+                // when pitch approaches ±90°.  TransformComponent stores Euler (YXZ)
+                // purely because the existing renderer pipeline uses them; a future
+                // refactor that stores a quaternion in TransformComponent would remove
+                // this limitation.
                 tr.position = phys.body.Position();
+                tr.rotation = glm::eulerAngles(phys.body.Orientation());
             });
     }
 

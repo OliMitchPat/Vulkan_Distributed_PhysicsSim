@@ -200,9 +200,6 @@
     <ClCompile Include="RenderGlobe.cpp">
       <Filter>Source Files\Render.cpp</Filter>
     </ClCompile>
-    <ClCompile Include="PhysicsSystem.cpp">
-      <Filter>Source Files\Systems</Filter>
-    </ClCompile>
     <ClCompile Include="UdpSocket.cpp">
       <Filter>Source Files\Systems</Filter>
     </ClCompile>

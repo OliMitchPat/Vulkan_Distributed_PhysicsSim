@@ -5,6 +5,7 @@
 #include <vector>
 #include "World.h"
 #include "ShapeData.h"
+#include "RigidBody.h"  
 
 // --------------------------------------------------
 // Enums used by multiple components
@@ -48,17 +49,18 @@ enum class ParticleType
 // --------------------------------------------------
 // PhysicsComponent
 // --------------------------------------------------
-#pragma once
-#include "RigidBody.h"
-
 struct PhysicsComponent
 {
     RigidBody body;
 
-    // Optional: per-entity material (useful for collision response later)
+    float density = 1000.0f;
+    BodyMotionType behaviour = BodyMotionType::Dynamic;
+
     float restitution = 0.5f;
     float staticFriction = 0.5f;
     float dynamicFriction = 0.3f;
+
+    bool initialized = false;
 };
 
 struct SphereColliderComponent

@@ -6,7 +6,7 @@
 #include "Components.h"
 
 #include "WorldShapes.h"
-#include "BuildWorldShapes.h"   // also pulls in Sphere.h, Plane.h, Capsule.h, Cylinder.h, Cuboid.h
+#include "BuildWorldShapes.h"   
 #include "Intersect.h"
 #include "Containment.h"
 #include "ResolveContact.h"

@@ -177,7 +177,6 @@
     <ClCompile Include="NetworkingSystem.cpp" />
     <ClCompile Include="ObjLoader.cpp" />
     <ClCompile Include="PeerConfig.cpp" />
-    <ClCompile Include="PhysicsSystem.cpp" />
     <ClCompile Include="Renderer.cpp" />
     <ClCompile Include="RendererParticles.cpp" />
     <ClCompile Include="RenderGlobe.cpp" />

@@ -1,24 +1,21 @@
 /*
- * SandboxSceneOne.cpp — Milestone 1: Core Concurrency Threading Scaffold
+ * SandboxSceneOne.cpp — Core Concurrency Threading Scaffold + Milestones 4/5
  *
- * Architecture (Option B startup: load scene, then start threads):
+ * Threads:
+ *   Render thread  — GLFW, Vulkan, ImGui, camera control
+ *   Sim thread     — ECS World, physics, collision, snapshot
+ *   Net thread     — UDP send/recv (GLOBAL_COMMAND + STATE_SNAPSHOT)
  *
- *   Main / Render thread  (core 0) — GLFW, Vulkan, ImGui, camera control
- *   Simulation thread     (core 3) — ECS World, physics, collision, snapshot
- *   Networking thread     (core 1) — scaffold only; no real sockets yet
- *
- * The sim thread owns the live ECS World exclusively.  Every tick it produces a
- * WorldSnapshot (instances + lights + particles) which is published via a
- * mutex-protected shared_ptr buffer.  The render thread reads the latest
- * snapshot each frame and never touches the live World.
- *
- * Camera state lives entirely in the render thread; it is NOT part of the World
- * after the initial scene load extracts starting values.
+ * Rules:
+ *   - Sim thread is the ONLY thread that mutates the live World.
+ *   - Net thread only talks to sockets and writes to thread-safe shared buffers.
+ *   - Render thread only consumes WorldSnapshot + controls UI.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <Windows.h>
+
 #include "World.h"
 #include "ScenarioManager.h"
 #include "Scenario.h"
@@ -26,17 +23,22 @@
 #include "RenderScene.h"
 #include "imgui.h"
 #include <GLFW/glfw3.h>
+
 #include "Scenario_PrimitiveScene.h"
 #include "Scenario_FlatbufferScene.h"
 #include "PhysicsSystem.h"
 #include "CollisionSystem.h"
+
 #include "PeerConfig.h"
 #include "WorldSnapshot.h"
 #include "ThreadUtils.h"
 #include "LoopController.h"
 #include "RigidBody.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+
 #include <thread>
 #include <atomic>
 #include <memory>
@@ -45,7 +47,26 @@
 #include <string>
 #include <mutex>
 #include <cstdint>
+#include <unordered_map>
+#include <vector>
+#include <iostream>
+
 #include "NetworkingSystem.h"
+#include "Components.h" // OwnerComponent
+
+ // ============================================================================
+ // Replica state storage (net -> sim)
+ // ============================================================================
+struct ReplicaState
+{
+    uint32_t objectId = 0;
+    glm::vec3 pos{ 0 };
+    glm::quat rot{ 1,0,0,0 };
+    glm::vec3 linVel{ 0 };
+    glm::vec3 angVel{ 0 };
+    uint32_t tick = 0;
+};
+
 // ============================================================================
 // Shared control state between threads
 // ============================================================================
@@ -55,39 +76,66 @@ struct SimSharedState
     std::atomic<bool> appRunning{ true };
 
     // Simulation controls (written by render/UI thread, read by sim thread)
-    std::atomic<bool>  simRunning       { true };
-    std::atomic<bool>  stepOnce         { false };
-    std::atomic<bool>  useFixedTimestep { true };
-    std::atomic<float> fixedDt          { 1.0f / 60.0f };
-    std::atomic<int>   integratorType   { 0 };   // IntegratorType enum value
-    std::atomic<bool> sendGlobalCommand{ false };
+    std::atomic<bool>  simRunning{ true };
+    std::atomic<bool>  stepOnce{ false };
+    std::atomic<bool>  useFixedTimestep{ true };
+    std::atomic<float> fixedDt{ 1.0f / 60.0f };
+    std::atomic<int>   integratorType{ 0 };   // IntegratorType enum value
 
     // Scene switching: render thread writes, sim thread reads and acts
     std::atomic<int> requestedSceneIndex{ -1 };
 
-    // Gravity enable flag: updated by sim thread after scene switch
+    // Gravity enable flag: updated by sim thread after scene switch and by GLOBAL command
     std::atomic<bool> gravityOn{ true };
+
+    // Local UI (per peer only): display mode
+    // 0 = colour by material, 1 = colour by owner
+    std::atomic<int> displayMode{ 0 };
+
+    // Outgoing GLOBAL UI requests (render thread -> networking thread)
+    std::atomic<bool> sendSceneChange{ false };
+    std::atomic<int>  sendSceneIndex{ -1 };
+
+    std::atomic<bool> sendGravityChange{ false };
+    std::atomic<bool> sendGravityEnabled{ true };
+
+    // Incoming GLOBAL UI commands (networking thread -> sim thread)
+    std::atomic<bool> pendingSceneChange{ false };
+    std::atomic<int>  pendingSceneIndex{ -1 };
+
+    std::atomic<bool> pendingGravityChange{ false };
+    std::atomic<bool> pendingGravityEnabled{ true };
 
     // Shared clear-colour (4 floats; written by UI, read by sim for snapshot)
     float clearColour[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
     std::mutex clearColourMutex;
 
     // Target Hz — live-adjustable from UI
-    std::atomic<float> targetRenderHz  { 60.0f };
-    std::atomic<float> targetNetworkHz { 60.0f };
-    std::atomic<float> targetSimHz     { 120.0f };
+    std::atomic<float> targetRenderHz{ 60.0f };
+    std::atomic<float> targetNetworkHz{ 60.0f };
+    std::atomic<float> targetSimHz{ 120.0f };
 
     // Measured Hz — written by each thread, read by UI
-    std::atomic<float> measuredRenderHz  { 0.0f };
-    std::atomic<float> measuredNetworkHz { 0.0f };
-    std::atomic<float> measuredSimHz     { 0.0f };
+    std::atomic<float> measuredRenderHz{ 0.0f };
+    std::atomic<float> measuredNetworkHz{ 0.0f };
+    std::atomic<float> measuredSimHz{ 0.0f };
 
     // Core indices actually assigned (for UI display)
-    int renderCoreAssigned  = ThreadUtils::CORE_RENDER;
-    int netCoreAssigned     = ThreadUtils::CORE_NET_0;
-    int simCoreAssigned     = ThreadUtils::CORE_SIM_0;
+    int renderCoreAssigned = ThreadUtils::CORE_RENDER;
+    int netCoreAssigned = ThreadUtils::CORE_NET_0;
+    int simCoreAssigned = ThreadUtils::CORE_SIM_0;
 
-    // Snapshot buffer
+    // ---- Milestone 5: outgoing snapshot (sim -> net) ----
+    std::mutex outSnapMutex;
+    std::vector<Net::StateSnapshotItem> outOwnedItems;
+    uint32_t outTick = 0;
+    bool outDirty = false;
+
+    // ---- Milestone 5: incoming replica snapshots (net -> sim) ----
+    std::mutex inSnapMutex;
+    std::unordered_map<uint32_t, ReplicaState> inReplicaLatest; // objectId -> latest
+
+    // Snapshot buffer (sim -> render)
     SnapshotBuffer snapshotBuf;
 };
 
@@ -96,11 +144,11 @@ struct SimSharedState
 // ============================================================================
 struct RenderCamera
 {
-    glm::vec3 position { 0.0f, 3.0f, -8.0f };
-    glm::vec3 rotation { 0.0f };   // Euler (pitch, yaw, roll) in radians
-    float fov      = 60.0f;
+    glm::vec3 position{ 0.0f, 3.0f, -8.0f };
+    glm::vec3 rotation{ 0.0f };   // Euler (pitch, yaw, roll) in radians
+    float fov = 60.0f;
     float nearClip = 0.1f;
-    float farClip  = 600.0f;
+    float farClip = 600.0f;
 };
 
 static CameraRenderData BuildCameraRenderData(const RenderCamera& cam, float aspect)
@@ -108,7 +156,7 @@ static CameraRenderData BuildCameraRenderData(const RenderCamera& cam, float asp
     CameraRenderData data{};
     data.position = cam.position;
 
-    const float yaw   = cam.rotation.y;
+    const float yaw = cam.rotation.y;
     const float pitch = cam.rotation.x;
 
     glm::vec3 forward{
@@ -126,6 +174,22 @@ static CameraRenderData BuildCameraRenderData(const RenderCamera& cam, float asp
 }
 
 // ============================================================================
+// Owner colour palette (Milestone 4)
+// ============================================================================
+static glm::vec3 OwnerColor(int ownerId)
+{
+    if (ownerId < 0) return glm::vec3(0.85f); // owned by all / local copy -> grey
+
+    static const glm::vec3 k[] = {
+        {1.0f, 0.2f, 0.2f},  // 0 red
+        {0.2f, 1.0f, 0.2f},  // 1 green
+        {0.2f, 0.4f, 1.0f},  // 2 blue
+        {1.0f, 1.0f, 0.2f},  // 3 yellow
+    };
+    return k[ownerId % (int)(sizeof(k) / sizeof(k[0]))];
+}
+
+// ============================================================================
 // Snapshot builder — called by the sim thread after each tick
 // ============================================================================
 static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
@@ -133,6 +197,8 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
 {
     auto snap = std::make_shared<WorldSnapshot>();
     snap->simTickNumber = tickNumber;
+
+    const int displayMode = shared.displayMode.load(std::memory_order_relaxed);
 
     // Clear colour
     {
@@ -146,66 +212,78 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
     // Instances (entities with Transform + RenderMesh + Material)
     extern int gForceShading; // defined in Main.cpp
     world.forEach<RenderMeshComponent>([&](Entity e, RenderMeshComponent& meshComp)
-    {
-        auto* tr  = world.getComponent<TransformComponent>(e);
-        auto* mat = world.getComponent<MaterialComponent>(e);
-        if (!tr || !mat) return;
+        {
+            auto* tr = world.getComponent<TransformComponent>(e);
+            auto* mat = world.getComponent<MaterialComponent>(e);
+            if (!tr || !mat) return;
 
-        RenderInstance inst{};
-        glm::mat4 M{ 1.0f };
-        M = glm::translate(M, tr->position);
-        M = glm::rotate(M, tr->rotation.y, glm::vec3(0, 1, 0));
-        M = glm::rotate(M, tr->rotation.x, glm::vec3(1, 0, 0));
-        M = glm::rotate(M, tr->rotation.z, glm::vec3(0, 0, 1));
-        M = glm::scale(M, tr->scale);
-        inst.model = M;
+            RenderInstance inst{};
+            glm::mat4 M{ 1.0f };
+            M = glm::translate(M, tr->position);
+            M = glm::rotate(M, tr->rotation.y, glm::vec3(0, 1, 0));
+            M = glm::rotate(M, tr->rotation.x, glm::vec3(1, 0, 0));
+            M = glm::rotate(M, tr->rotation.z, glm::vec3(0, 0, 1));
+            M = glm::scale(M, tr->scale);
+            inst.model = M;
 
-        inst.meshName     = meshComp.meshName;
-        inst.textureName  = meshComp.textureName;
-        inst.shadingModel = mat->shadingModel;
-        inst.diffuseColor = mat->diffuseColor;
-        inst.specularColor = mat->specularColor;
-        inst.shininess    = mat->shininess;
-        inst.castsShadows    = mat->castsShadows;
-        inst.receivesShadows = mat->receivesShadows;
+            inst.meshName = meshComp.meshName;
+            inst.textureName = meshComp.textureName;
+            inst.shadingModel = mat->shadingModel;
+            inst.diffuseColor = mat->diffuseColor;
+            inst.specularColor = mat->specularColor;
+            inst.shininess = mat->shininess;
+            inst.castsShadows = mat->castsShadows;
+            inst.receivesShadows = mat->receivesShadows;
 
-        if (gForceShading == 0) inst.shadingModel = ShadingModel::Gouraud;
-        if (gForceShading == 1) inst.shadingModel = ShadingModel::Phong;
+            // Local UI override: colour by owner
+            if (displayMode == 1)
+            {
+                if (auto* owner = world.getComponent<OwnerComponent>(e))
+                {
+                    inst.diffuseColor = OwnerColor(owner->ownerId);
+                    inst.specularColor = glm::vec3(0.05f);
+                    inst.shininess = 4.0f;
+                }
+            }
 
-        snap->instances.push_back(std::move(inst));
-    });
+            if (gForceShading == 0) inst.shadingModel = ShadingModel::Gouraud;
+            if (gForceShading == 1) inst.shadingModel = ShadingModel::Phong;
+
+            snap->instances.push_back(std::move(inst));
+        });
 
     // Directional lights
     world.forEach<DirectionalLightComponent>([&](Entity, DirectionalLightComponent& light)
-    {
-        DirectionalLightRenderData d;
-        d.direction = light.direction;
-        d.color     = light.color;
-        d.intensity = light.intensity;
-        snap->directionalLights.push_back(d);
-    });
+        {
+            DirectionalLightRenderData d;
+            d.direction = light.direction;
+            d.color = light.color;
+            d.intensity = light.intensity;
+            snap->directionalLights.push_back(d);
+        });
 
     // Spark lights
     world.forEach<SparkLightComponent>([&](Entity e, SparkLightComponent& s)
-    {
-        if (!s.active) return;
-        auto* tr = world.getComponent<TransformComponent>(e);
-        if (!tr) return;
-        SparkLightRenderData out{};
-        out.position  = tr->position;
-        out.radius    = s.radius;
-        out.color     = s.color;
-        out.intensity = s.intensity;
-        snap->sparkLights.push_back(out);
-        if ((int)snap->sparkLights.size() >= 32) return;
-    });
+        {
+            if (!s.active) return;
+            auto* tr = world.getComponent<TransformComponent>(e);
+            if (!tr) return;
+            SparkLightRenderData out{};
+            out.position = tr->position;
+            out.radius = s.radius;
+            out.color = s.color;
+            out.intensity = s.intensity;
+            snap->sparkLights.push_back(out);
+            if ((int)snap->sparkLights.size() >= 32) return;
+        });
 
     // Particles
     Entity envEntity = INVALID_ENTITY;
     world.forEach<EnvironmentStateComponent>([&](Entity e, EnvironmentStateComponent&)
-    {
-        if (envEntity == INVALID_ENTITY) envEntity = e;
-    });
+        {
+            if (envEntity == INVALID_ENTITY) envEntity = e;
+        });
+
     if (envEntity != INVALID_ENTITY)
     {
         auto* pool = world.getComponent<ParticlePoolComponent>(envEntity);
@@ -258,15 +336,15 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
 // Simulation thread entry point
 // ============================================================================
 static void SimulationThreadFunc(SimSharedState& shared, World& world,
-                                 ScenarioManager& scenarios,
-                                 PhysicsSystem& physicsSystem,
-                                 CollisionSystem& collisionSystem)
+    ScenarioManager& scenarios,
+    PhysicsSystem& physicsSystem,
+    CollisionSystem& collisionSystem)
 {
     // Affinity + name
     const int numCores = ThreadUtils::LogicalCoreCount();
     const int assignedCore = (ThreadUtils::CORE_SIM_0 < numCores)
-                           ? ThreadUtils::CORE_SIM_0
-                           : (numCores - 1);
+        ? ThreadUtils::CORE_SIM_0
+        : (numCores - 1);
     ThreadUtils::PinCurrentThreadToCore(assignedCore);
     ThreadUtils::SetCurrentThreadName("Sim");
     shared.simCoreAssigned = assignedCore;
@@ -274,7 +352,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
     LoopController lc(shared.targetSimHz.load(std::memory_order_relaxed));
     uint64_t tickNumber = 0;
     float    accumulator = 0.0f;
-    const float maxDt    = 0.25f;
+    const float maxDt = 0.25f;
 
     while (shared.appRunning.load(std::memory_order_relaxed))
     {
@@ -288,9 +366,9 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
         dt = std::min(dt, maxDt);
 
         // Read controls
-        const bool   running       = shared.simRunning.load(std::memory_order_relaxed);
-        const bool   useFixed      = shared.useFixedTimestep.load(std::memory_order_relaxed);
-        const float  fdt           = shared.fixedDt.load(std::memory_order_relaxed);
+        const bool   running = shared.simRunning.load(std::memory_order_relaxed);
+        const bool   useFixed = shared.useFixedTimestep.load(std::memory_order_relaxed);
+        const float  fdt = shared.fixedDt.load(std::memory_order_relaxed);
         const IntegratorType integ = static_cast<IntegratorType>(
             shared.integratorType.load(std::memory_order_relaxed));
 
@@ -305,6 +383,20 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
         physicsSystem.SetIntegrator(integ);
 
+        // ----- Apply GLOBAL commands received from networking thread -----
+        if (shared.pendingSceneChange.exchange(false, std::memory_order_acq_rel))
+        {
+            const int idx = shared.pendingSceneIndex.load(std::memory_order_relaxed);
+            shared.requestedSceneIndex.store(idx, std::memory_order_release);
+        }
+
+        if (shared.pendingGravityChange.exchange(false, std::memory_order_acq_rel))
+        {
+            const bool enabled = shared.pendingGravityEnabled.load(std::memory_order_relaxed);
+            physicsSystem.SetGravityEnabled(enabled);
+            shared.gravityOn.store(enabled, std::memory_order_relaxed);
+        }
+
         // ----- Handle scene switch request from render/UI thread -----
         {
             int desired = shared.requestedSceneIndex.load(std::memory_order_acquire);
@@ -313,22 +405,58 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 if (desired != scenarios.CurrentIndex())
                 {
                     scenarios.SwitchTo(world, desired);
-                    accumulator = 0.0f;  // discard stale accumulator
+                    accumulator = 0.0f;
 
-                    // Apply scene gravity
+                    // Scene default gravity (note: this may override global gravity policy)
                     const bool grav = scenarios.Current()
-                                          ? scenarios.Current()->GravityOn()
-                                          : true;
+                        ? scenarios.Current()->GravityOn()
+                        : true;
                     physicsSystem.SetGravityEnabled(grav);
                     shared.gravityOn.store(grav, std::memory_order_relaxed);
                 }
-                // Only clear the value we consumed; if the render thread
-                // has already posted a newer request, the CAS fails and
-                // that request will be processed next tick.
+
                 shared.requestedSceneIndex.compare_exchange_strong(
                     desired, -1,
                     std::memory_order_release,
                     std::memory_order_relaxed);
+            }
+        }
+
+        // ----- Milestone 5: apply incoming replica snapshots (net -> sim) -----
+        {
+            std::unordered_map<uint32_t, ReplicaState> latest;
+            {
+                std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                latest = shared.inReplicaLatest; // copy to minimize lock time
+            }
+
+            for (auto& kv : latest)
+            {
+                const uint32_t id = kv.first;
+                const ReplicaState& st = kv.second;
+
+                Entity e = (Entity)id;
+
+                auto* phys = world.getComponent<PhysicsComponent>(e);
+                auto* tr = world.getComponent<TransformComponent>(e);
+                if (!phys || !tr) continue;
+
+                // Don't override authoritative bodies
+                if (phys->body.IsDynamic()) continue;
+
+                phys->body.SetPosition(st.pos);
+                phys->body.SetOrientation(st.rot);
+                phys->body.SetLinearVelocity(st.linVel);
+                phys->body.SetAngularVelocity(st.angVel);
+
+                tr->position = st.pos;
+                tr->rotation = glm::eulerAngles(st.rot);
+
+                if (id == 0 && (tickNumber % 60 == 0))
+                {
+                   /* std::cout << "[SIM] apply replica id=0 tick=" << st.tick
+						<< " pos=(" << st.pos.x << "," << st.pos.y << "," << st.pos.z << ")\n"; */
+                }
             }
         }
 
@@ -352,7 +480,6 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             }
             else
             {
-                // Variable timestep
                 if (running || doStep)
                 {
                     float stepDt = running ? dt : fdt;
@@ -364,13 +491,48 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             }
         }
 
-        // Publish snapshot every tick
+        // ----- Milestone 5: build outgoing STATE_SNAPSHOT (owned dynamics) -----
+        {
+            std::vector<Net::StateSnapshotItem> items;
+            items.reserve(256);
+
+            world.forEach<PhysicsComponent>([&](Entity e, PhysicsComponent& phys)
+                {
+                    if (!phys.body.IsDynamic())
+                        return;
+
+                    Net::StateSnapshotItem it{};
+                    it.objectId = (uint32_t)e;
+
+                    const glm::vec3 p = phys.body.Position();
+                    const glm::quat q = phys.body.Orientation();
+                    const glm::vec3 v = phys.body.LinearVelocity();
+                    const glm::vec3 w = phys.body.AngularVelocity();
+
+                    it.pos = { p.x, p.y, p.z };
+                    it.rot = { q.x, q.y, q.z, q.w };
+                    it.linVel = { v.x, v.y, v.z };
+                    it.angVel = { w.x, w.y, w.z };
+
+                    items.push_back(it);
+                });
+
+            std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+            shared.outOwnedItems = std::move(items);
+            shared.outTick = (uint32_t)tickNumber;
+            shared.outDirty = true;
+        }
+
+        // Publish render snapshot every tick
         shared.snapshotBuf.publish(CaptureSnapshot(world, tickNumber, shared));
 
         lc.endFrame();
     }
 }
 
+// ============================================================================
+// Networking thread entry point
+// ============================================================================
 static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& cfg)
 {
     using namespace Net;
@@ -385,7 +547,6 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
     ThreadUtils::SetCurrentThreadName("Net");
     shared.netCoreAssigned = assignedCore;
 
-    // ---- Networking system ----
     NetworkingSystem net;
     if (!net.Init(cfg))
         return;
@@ -401,9 +562,87 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
         net.Update(dt);
 
-        if (shared.sendGlobalCommand.exchange(false))
+        // ---- Send outgoing global commands (from render thread) ----
+        if (shared.sendSceneChange.exchange(false, std::memory_order_acq_rel))
         {
-            net.SendGlobalCommand(/* commandId */ 1);
+            const int idx = shared.sendSceneIndex.load(std::memory_order_relaxed);
+            net.SendSceneChange(idx);
+        }
+
+        if (shared.sendGravityChange.exchange(false, std::memory_order_acq_rel))
+        {
+            const bool enabled = shared.sendGravityEnabled.load(std::memory_order_relaxed);
+            net.SendGravityEnabled(enabled);
+        }
+
+        // ---- Receive incoming global commands and forward to sim thread ----
+        GlobalCommandPayload cmd{};
+        while (net.PopReceivedGlobalCommand(cmd))
+        {
+            const auto type = (GlobalCommandType)cmd.commandType;
+
+            if (type == GlobalCommandType::SceneChange)
+            {
+                shared.pendingSceneIndex.store(cmd.sceneIndex, std::memory_order_relaxed);
+                shared.pendingSceneChange.store(true, std::memory_order_release);
+            }
+            else if (type == GlobalCommandType::GravityOnOff)
+            {
+                shared.pendingGravityEnabled.store(cmd.gravityEnabled != 0, std::memory_order_relaxed);
+                shared.pendingGravityChange.store(true, std::memory_order_release);
+            }
+        }
+
+        // ---- Milestone 5: send STATE_SNAPSHOT once per networking tick ----
+        {
+            std::vector<StateSnapshotItem> items;
+            uint32_t tick = 0;
+            bool dirty = false;
+
+            {
+                std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                dirty = shared.outDirty;
+                if (dirty)
+                {
+                    items = shared.outOwnedItems; // copy
+                    tick = shared.outTick;
+                    shared.outDirty = false;
+                }
+            }
+
+            if (dirty && !items.empty())
+            {
+                net.SendStateSnapshot(tick, items.data(), (uint16_t)items.size());
+            }
+        }
+
+        // ---- Milestone 5: receive STATE_SNAPSHOT and store latest per object ----
+        {
+            std::vector<StateSnapshotItem> items;
+            uint32_t tick = 0;
+
+            while (net.PopReceivedStateSnapshot(items, tick))
+            {
+               /* std::cout << "[NET] SNAP recv tick=" << tick
+                    << " count=" << items.size()
+                    << " firstId=" << (items.empty() ? 0 : items[0].objectId)
+                    << "\n";
+                    */
+                std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+
+                for (const auto& it : items)
+                {
+                    ReplicaState st{};
+                    st.objectId = it.objectId;
+                    st.pos = glm::vec3(it.pos.x, it.pos.y, it.pos.z);
+                    st.rot = glm::quat(it.rot.w, it.rot.x, it.rot.y, it.rot.z); // glm quat is (w,x,y,z)
+                    st.linVel = glm::vec3(it.linVel.x, it.linVel.y, it.linVel.z);
+                    st.angVel = glm::vec3(it.angVel.x, it.angVel.y, it.angVel.z);
+                    st.tick = tick;
+
+                    shared.inReplicaLatest[it.objectId] = st;
+                }
+            }
         }
 
         lc.endFrame();
@@ -411,36 +650,33 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
     net.Shutdown();
 }
+
 // ============================================================================
 // RunSandbox — main / render thread
 // ============================================================================
 int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cfg)
 {
-    // ---- Option B: load scene single-threaded BEFORE starting threads ----
     World            world;
     PhysicsSystem    physicsSystem;
+    physicsSystem.SetLocalPeerId(cfg.peer_id);
+
     CollisionSystem  collisionSystem;
     ScenarioManager  scenarios;
 
     scenarios.Add(std::make_unique<Scenario_PrimitiveScene>());
-    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
-        "assets/scenes/newtonsCradle.bin"));
-    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
-        "assets/scenes/bouncingBalls.bin"));
-    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
-		"assets/scenes/piston.bin"));
-    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
-        "assets/scenes/sphereSpawners.bin"));
-    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>(
-        "assets/scenes/tumbler.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/newtonsCradle.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/bouncingBalls.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/piston.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/sphereSpawners.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/tumbler.bin"));
+
     if (scenarios.Count() > 0)
         scenarios.SwitchTo(world, 0);
 
-    // ---- Shared state — initialise Hz targets from config ----
     SimSharedState shared;
-    shared.targetRenderHz .store(cfg.render_hz,     std::memory_order_relaxed);
-    shared.targetNetworkHz.store(cfg.network_hz,    std::memory_order_relaxed);
-    shared.targetSimHz    .store(cfg.simulation_hz, std::memory_order_relaxed);
+    shared.targetRenderHz.store(cfg.render_hz, std::memory_order_relaxed);
+    shared.targetNetworkHz.store(cfg.network_hz, std::memory_order_relaxed);
+    shared.targetSimHz.store(cfg.simulation_hz, std::memory_order_relaxed);
 
     // Initialise gravity from the initial scene
     if (scenarios.Current())
@@ -460,38 +696,38 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         shared.clearColour[3] = cc[3];
     }
 
-    // ---- Extract initial camera state from the Overview camera entity ----
+    // Extract initial camera state from the Overview camera entity
     RenderCamera renderCamera;
     world.forEach<CameraRoleComponent>([&](Entity e, CameraRoleComponent& r)
-    {
-        if (r.role == CameraRole::Overview)
         {
-            if (auto* tr = world.getComponent<TransformComponent>(e))
+            if (r.role == CameraRole::Overview)
             {
-                renderCamera.position = tr->position;
-                renderCamera.rotation = tr->rotation;
+                if (auto* tr = world.getComponent<TransformComponent>(e))
+                {
+                    renderCamera.position = tr->position;
+                    renderCamera.rotation = tr->rotation;
+                }
+                if (auto* cam = world.getComponent<CameraComponent>(e))
+                {
+                    renderCamera.fov = cam->fov;
+                    renderCamera.nearClip = cam->nearClip;
+                    renderCamera.farClip = cam->farClip;
+                }
             }
-            if (auto* cam = world.getComponent<CameraComponent>(e))
-            {
-                renderCamera.fov      = cam->fov;
-                renderCamera.nearClip = cam->nearClip;
-                renderCamera.farClip  = cam->farClip;
-            }
-        }
-    });
+        });
 
-    // ---- Pin main (render) thread to core 0 ----
+    // Pin main (render) thread
     const int numCores = ThreadUtils::LogicalCoreCount();
     const int renderCore = (ThreadUtils::CORE_RENDER < numCores)
-                         ? ThreadUtils::CORE_RENDER : (numCores - 1);
+        ? ThreadUtils::CORE_RENDER : (numCores - 1);
     ThreadUtils::PinCurrentThreadToCore(renderCore);
     ThreadUtils::SetCurrentThreadName("Render");
     shared.renderCoreAssigned = renderCore;
 
-    // ---- Produce an initial snapshot so the renderer doesn't start blank ----
+    // Produce an initial snapshot so the renderer doesn't start blank
     shared.snapshotBuf.publish(CaptureSnapshot(world, 0, shared));
 
-    // ---- Start background threads ----
+    // Start background threads
     std::thread simThread(SimulationThreadFunc,
         std::ref(shared), std::ref(world),
         std::ref(scenarios), std::ref(physicsSystem),
@@ -499,41 +735,36 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
     std::thread netThread(NetworkingThreadFunc, std::ref(shared), std::cref(cfg));
 
-    // ---- Render / UI loop state ----
+    // Render / UI loop state
     LoopController renderLC(shared.targetRenderHz.load(std::memory_order_relaxed));
-
-    CameraRole activeCameraMode = CameraRole::Overview; // selects which preset to use
+    CameraRole activeCameraMode = CameraRole::Overview;
     const float maxFrameDt = 0.25f;
 
-    // ImGui display copies (atomic reads are noisy inside ImGui calls)
-    float displayRenderHz  = 0.0f;
-    float displayNetHz     = 0.0f;
-    float displaySimHz     = 0.0f;
+    float displayRenderHz = 0.0f;
+    float displayNetHz = 0.0f;
+    float displaySimHz = 0.0f;
 
-    // Local copies of target Hz for ImGui sliders
-    float uiRenderHz  = cfg.render_hz;
-    float uiNetHz     = cfg.network_hz;
-    float uiSimHz     = cfg.simulation_hz;
+    float uiRenderHz = cfg.render_hz;
+    float uiNetHz = cfg.network_hz;
+    float uiSimHz = cfg.simulation_hz;
 
-    // ---- Main render loop ----
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
 
-        // Live-apply render Hz target
         renderLC.setTargetHz(shared.targetRenderHz.load(std::memory_order_relaxed));
         float dt = renderLC.beginFrame();
         shared.measuredRenderHz.store(renderLC.getMeasuredHz(), std::memory_order_relaxed);
         dt = std::min(dt, maxFrameDt);
 
-        // ---- Camera movement (render thread only) ----
+        // Camera movement (render thread only)
         if (!ImGui::GetIO().WantCaptureKeyboard)
         {
             const float lookSpeed = 1.5f;
             if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) renderCamera.rotation.y -= lookSpeed * dt;
-            if (glfwGetKey(window, GLFW_KEY_LEFT)  == GLFW_PRESS) renderCamera.rotation.y += lookSpeed * dt;
-            if (glfwGetKey(window, GLFW_KEY_UP)    == GLFW_PRESS) renderCamera.rotation.x += lookSpeed * dt;
-            if (glfwGetKey(window, GLFW_KEY_DOWN)  == GLFW_PRESS) renderCamera.rotation.x -= lookSpeed * dt;
+            if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)  renderCamera.rotation.y += lookSpeed * dt;
+            if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)    renderCamera.rotation.x += lookSpeed * dt;
+            if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)  renderCamera.rotation.x -= lookSpeed * dt;
 
             const float pitchLimit = glm::radians(89.0f);
             renderCamera.rotation.x = glm::clamp(renderCamera.rotation.x, -pitchLimit, pitchLimit);
@@ -554,26 +785,22 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 glm::vec3 forward(std::sin(yaw), 0.0f, std::cos(yaw));
                 glm::vec3 right(forward.z, 0.0f, -forward.x);
                 glm::vec3 up(0.0f, 1.0f, 0.0f);
-                renderCamera.position +=
-                    (right * moveLocal.x + up * moveLocal.y + forward * moveLocal.z)
-                    * (moveSpeed * dt);
+                renderCamera.position += (right * moveLocal.x + up * moveLocal.y + forward * moveLocal.z) * (moveSpeed * dt);
             }
         }
 
-        // ---- Snapshot: consume latest from sim thread ----
+        // Snapshot: consume latest from sim thread
         std::shared_ptr<WorldSnapshot> snap = shared.snapshotBuf.consume();
 
-        // ---- ImGui ----
+        // ImGui
         renderer.BeginImGuiFrame();
 
-        // Refresh display values periodically
-        displayRenderHz = shared.measuredRenderHz .load(std::memory_order_relaxed);
-        displayNetHz    = shared.measuredNetworkHz.load(std::memory_order_relaxed);
-        displaySimHz    = shared.measuredSimHz    .load(std::memory_order_relaxed);
+        displayRenderHz = shared.measuredRenderHz.load(std::memory_order_relaxed);
+        displayNetHz = shared.measuredNetworkHz.load(std::memory_order_relaxed);
+        displaySimHz = shared.measuredSimHz.load(std::memory_order_relaxed);
 
         if (ImGui::BeginMainMenuBar())
         {
-            // ---- Simulation menu ----
             if (ImGui::BeginMenu("Simulation"))
             {
                 bool simRunning = shared.simRunning.load(std::memory_order_relaxed);
@@ -607,24 +834,30 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 ImGui::EndMenu();
             }
 
-            // ---- View menu ----
             if (ImGui::BeginMenu("View"))
             {
-                std::lock_guard<std::mutex> lk(shared.clearColourMutex);
-                ImGui::ColorEdit3("Background", shared.clearColour);
+                {
+                    std::lock_guard<std::mutex> lk(shared.clearColourMutex);
+                    ImGui::ColorEdit3("Background", shared.clearColour);
+                }
+
+                ImGui::SeparatorText("Local Display");
+                int mode = shared.displayMode.load(std::memory_order_relaxed);
+                if (ImGui::RadioButton("Colour by Material", mode == 0)) mode = 0;
+                if (ImGui::RadioButton("Colour by Owner", mode == 1)) mode = 1;
+                shared.displayMode.store(mode, std::memory_order_relaxed);
+
                 ImGui::EndMenu();
             }
 
-            // ---- Camera menu ----
             if (ImGui::BeginMenu("Camera"))
             {
-                bool isOverview   = (activeCameraMode == CameraRole::Overview);
+                bool isOverview = (activeCameraMode == CameraRole::Overview);
                 bool isNavigation = (activeCameraMode == CameraRole::Navigation);
 
                 if (ImGui::MenuItem("Overview", nullptr, isOverview))
                 {
                     activeCameraMode = CameraRole::Overview;
-                    // Snap camera back to overview starting position
                     renderCamera.position = glm::vec3(0.0f, 25.0f, 0.0f);
                     renderCamera.rotation = glm::radians(glm::vec3(-90.0f, 0.0f, 0.0f));
                 }
@@ -636,12 +869,11 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 }
 
                 ImGui::Separator();
-                ImGui::DragFloat3("Position",        &renderCamera.position.x, 0.1f);
-                ImGui::DragFloat3("Rotation (rad)",  &renderCamera.rotation.x, 0.02f);
+                ImGui::DragFloat3("Position", &renderCamera.position.x, 0.1f);
+                ImGui::DragFloat3("Rotation (rad)", &renderCamera.rotation.x, 0.02f);
                 ImGui::EndMenu();
             }
 
-            // ---- Scene menu (Global UI: swap between loaded scenes) ----
             if (ImGui::BeginMenu("Scene"))
             {
                 ImGui::SeparatorText("Switch Scene");
@@ -652,37 +884,48 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 for (int si = 0; si < scenarios.Count(); ++si)
                 {
                     const bool selected = (si == currentIdx);
-                    if (ImGui::MenuItem(scenarios.Get(si)->Name(),
-                                        nullptr, selected))
+                    if (ImGui::MenuItem(scenarios.Get(si)->Name(), nullptr, selected))
                     {
                         if (si != currentIdx)
-                            shared.requestedSceneIndex.store(
-                                si, std::memory_order_release);
+                        {
+                            // Apply locally immediately
+                            shared.requestedSceneIndex.store(si, std::memory_order_release);
+
+                            // Send globally
+                            shared.sendSceneIndex.store(si, std::memory_order_relaxed);
+                            shared.sendSceneChange.store(true, std::memory_order_release);
+                        }
                     }
                 }
 
                 ImGui::Separator();
-                const bool grav = shared.gravityOn.load(std::memory_order_relaxed);
+
+                bool grav = shared.gravityOn.load(std::memory_order_relaxed);
                 ImGui::Text("Gravity: %s", grav ? "ON" : "OFF");
+                if (ImGui::Checkbox("Gravity Enabled (GLOBAL)", &grav))
+                {
+                    // Apply locally (sim thread will apply next tick)
+                    shared.pendingGravityEnabled.store(grav, std::memory_order_relaxed);
+                    shared.pendingGravityChange.store(true, std::memory_order_release);
+
+                    // Send globally
+                    shared.sendGravityEnabled.store(grav, std::memory_order_relaxed);
+                    shared.sendGravityChange.store(true, std::memory_order_release);
+                }
 
                 ImGui::EndMenu();
             }
 
-            // ---- Concurrency menu ----
             if (ImGui::BeginMenu("Concurrency"))
             {
                 ImGui::SeparatorText("Target Frequencies");
 
-                if (ImGui::SliderFloat("Render Hz",  &uiRenderHz,  0.0f, 300.0f, "%.0f"))
-                    shared.targetRenderHz.store(uiRenderHz,  std::memory_order_relaxed);
-                if (ImGui::SliderFloat("Network Hz", &uiNetHz,     0.0f, 120.0f, "%.0f"))
-                    shared.targetNetworkHz.store(uiNetHz,   std::memory_order_relaxed);
-                if (ImGui::SliderFloat("Sim Hz",     &uiSimHz,     0.0f, 500.0f, "%.0f"))
-                    shared.targetSimHz.store(uiSimHz,       std::memory_order_relaxed);
-                if (ImGui::Button("Send Global Command"))
-                {
-                    shared.sendGlobalCommand.store(true, std::memory_order_relaxed);
-                }
+                if (ImGui::SliderFloat("Render Hz", &uiRenderHz, 0.0f, 300.0f, "%.0f"))
+                    shared.targetRenderHz.store(uiRenderHz, std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Network Hz", &uiNetHz, 0.0f, 120.0f, "%.0f"))
+                    shared.targetNetworkHz.store(uiNetHz, std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Sim Hz", &uiSimHz, 0.0f, 500.0f, "%.0f"))
+                    shared.targetSimHz.store(uiSimHz, std::memory_order_relaxed);
 
                 ImGui::TextDisabled("(0 = uncapped)");
                 ImGui::Separator();
@@ -713,24 +956,23 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
         renderer.EndImGuiFrame();
 
-        // ---- Build RenderScene from snapshot + camera and render ----
         if (snap)
         {
             RenderScene scene{};
-            scene.camera           = BuildCameraRenderData(renderCamera, renderer.getAspectRatio());
-            scene.ambientLight     = snap->ambientLight;
-            scene.clearColor       = snap->clearColor;
-            scene.instances        = snap->instances;
-            scene.particles        = snap->particles;
+            scene.camera = BuildCameraRenderData(renderCamera, renderer.getAspectRatio());
+            scene.ambientLight = snap->ambientLight;
+            scene.clearColor = snap->clearColor;
+            scene.instances = snap->instances;
+            scene.particles = snap->particles;
             scene.directionalLights = snap->directionalLights;
-            scene.sparkLights      = snap->sparkLights;
+            scene.sparkLights = snap->sparkLights;
             renderer.render(scene);
         }
 
         renderLC.endFrame();
     }
 
-    // ---- Shutdown: signal threads and join ----
+    // Shutdown
     shared.appRunning.store(false, std::memory_order_relaxed);
 
     if (simThread.joinable()) simThread.join();

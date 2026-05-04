@@ -31,14 +31,26 @@ namespace Net
         std::vector<PendingMessage> resendQueue;
     };
 
+#pragma pack(push, 1)
     struct GlobalCommandPayload
     {
         uint8_t commandType = 0;
+
+        // Used by SceneChange
+        int32_t sceneIndex = -1;
+
+        // Used by GravityOnOff
+        uint8_t gravityEnabled = 1;
+
+        // padding (explicit so size is predictable)
+        uint8_t _pad0 = 0;
+        uint16_t _pad1 = 0;
     };
+#pragma pack(pop)
 
     enum class GlobalCommandType : uint8_t
     {
-        ToggleGravity = 1,
-        ResetScene = 2
+        SceneChange = 1,
+        GravityOnOff = 2
     };
 }

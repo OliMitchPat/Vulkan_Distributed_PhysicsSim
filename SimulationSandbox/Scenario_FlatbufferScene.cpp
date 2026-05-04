@@ -89,6 +89,8 @@ namespace
         }, shape);
     }
 
+
+
     // Short string describing a shape for the scene dump log
     std::string ShapeDumpStr(const ShapeData& shape, float uniformScale)
     {
@@ -354,6 +356,28 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 
         // ----- NameComponent -----
         world.addComponent(e, NameComponent{ objName });
+
+        // ----- OwnerComponent -----
+        {
+            OwnerComponent oc{};
+            oc.ownerId = -1; // Static/Animated = owned by all
+
+            if (obj->behaviour_type() == Simulation::Behaviour_SimulatedObject)
+            {
+                const auto* sim = obj->behaviour_as_SimulatedObject();
+                if (sim)
+                {
+                    // ObjectOwnerType is ONE..FOUR -> convert to 0..3
+                    oc.ownerId = (int)sim->owner() - 1;
+                }
+                else
+                {
+                    oc.ownerId = 0; // fallback
+                }
+            }
+
+            world.addComponent(e, oc);
+        }
 
         // ----- TransformComponent -----
         {

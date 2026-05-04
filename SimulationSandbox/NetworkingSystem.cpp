@@ -7,7 +7,7 @@
 namespace Net
 {
     // ============================================================
-    // Internal helper: find peer by address
+    // Internal helper: find peer by id
     // ============================================================
     static Peer* FindPeerById(std::vector<Peer>& peers, int peerId)
     {
@@ -72,26 +72,26 @@ namespace Net
 
         for (auto& p : m_peers)
         {
-            m_socket.Send(p.addr, p.addrLen, &msg, sizeof(msg));
+            m_socket.Send(p.addr, p.addrLen, &msg, (int)sizeof(msg));
         }
     }
 
     // ============================================================
     // Send ACK
     // ============================================================
-    void SendAck(UdpSocket& socket, Peer& peer, int localPeerId, uint32_t seq)
+    static void SendAck(UdpSocket& socket, Peer& peer, int localPeerId, uint32_t seq)
     {
         MsgHeader ack{};
         ack.msgType = (uint8_t)MsgType::ACK;
         ack.peerId = (uint8_t)localPeerId;
         ack.ack = seq;
 
-        socket.Send(peer.addr, peer.addrLen, &ack, sizeof(ack));
+        socket.Send(peer.addr, peer.addrLen, &ack, (int)sizeof(ack));
     }
 
     // ============================================================
-// Send Reliable Message
-// ============================================================
+    // Send Reliable Message
+    // ============================================================
     static void SendReliable(UdpSocket& socket, Peer& peer, const void* data, int size)
     {
         socket.Send(peer.addr, peer.addrLen, data, size);
@@ -120,13 +120,12 @@ namespace Net
             HandlePacket(from, m_recvBuffer, size);
         }
 
-        // ---- Resend logic ----
+        // ---- Resend logic (reliable queue) ----
         constexpr float RESEND_INTERVAL_SEC = 0.5f;
         constexpr int   MAX_RETRIES = 10;
 
         for (auto& peer : m_peers)
         {
-            // Iterate with index so we can erase safely
             for (size_t i = 0; i < peer.resendQueue.size(); /* increment inside */)
             {
                 auto& msg = peer.resendQueue[i];
@@ -136,16 +135,14 @@ namespace Net
                 {
                     if (msg.retries >= MAX_RETRIES)
                     {
-                        // Give up on this message
                         std::cout << "[NET] Drop reliable msg seq=" << msg.seq
                             << " to peer " << peer.peerId
                             << " (max retries reached)\n";
 
                         peer.resendQueue.erase(peer.resendQueue.begin() + i);
-                        continue; // don't increment i (we erased current)
+                        continue;
                     }
 
-                    // Resend
                     m_socket.Send(peer.addr, peer.addrLen,
                         msg.data.data(), (int)msg.data.size());
 
@@ -180,7 +177,6 @@ namespace Net
             return;
 
         // Learn/update the sender address so ACKs/resends go to the correct endpoint.
-        // (This is important now that we no longer match peers by address.)
         peer->addr = from;
         peer->addrLen = Net::SockaddrLen(from);
 
@@ -216,7 +212,6 @@ namespace Net
                         return m.seq == hdr->ack;
                     }),
                 queue.end());
-
             break;
         }
 
@@ -225,13 +220,11 @@ namespace Net
             // Always ACK reliable messages (even duplicates)
             SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
 
-            // Duplicate suppression (prevents applying the same reliable command twice)
+            // Duplicate suppression
             if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)
                 break;
 
             peer->lastReceivedSeq = hdr->seq;
-
-            std::cout << "Received GLOBAL_COMMAND from peer " << (int)hdr->peerId << "\n";
 
             if (size < (int)sizeof(MsgHeader) + (int)sizeof(GlobalCommandPayload))
                 break;
@@ -239,20 +232,34 @@ namespace Net
             const GlobalCommandPayload* payload =
                 reinterpret_cast<const GlobalCommandPayload*>(data + sizeof(MsgHeader));
 
-            switch ((GlobalCommandType)payload->commandType)
-            {
-            case GlobalCommandType::ToggleGravity:
-                std::cout << "GLOBAL: Toggle Gravity\n";
-                // later: hook into physics system
+            // Store latest for PopReceivedGlobalCommand()
+            m_pendingGlobal = *payload;
+            m_hasPendingGlobal.store(true, std::memory_order_release);
+
+            break;
+        }
+
+        case MsgType::STATE_SNAPSHOT:
+        {
+            // Unreliable: no ACK, no seq checks. Use tick for ordering if desired.
+            if (size < (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader)))
                 break;
 
-            case GlobalCommandType::ResetScene:
-                std::cout << "GLOBAL: Reset Scene\n";
+            const StateSnapshotHeader* sh =
+                reinterpret_cast<const StateSnapshotHeader*>(data + sizeof(MsgHeader));
+
+            const int count = (int)sh->count;
+            const int expectedSize = (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader) + count * sizeof(StateSnapshotItem));
+            if (count < 0 || expectedSize > size)
                 break;
 
-            default:
-                break;
-            }
+            const StateSnapshotItem* items =
+                reinterpret_cast<const StateSnapshotItem*>(data + sizeof(MsgHeader) + sizeof(StateSnapshotHeader));
+
+            // Store latest snapshot (single-slot mailbox)
+            m_pendingSnapshotTick = hdr->tick;
+            m_pendingSnapshotItems.assign(items, items + count);
+            m_hasPendingSnapshot.store(true, std::memory_order_release);
 
             break;
         }
@@ -262,7 +269,35 @@ namespace Net
         }
     }
 
-    void NetworkingSystem::SendGlobalCommand(uint8_t commandType)
+    // ============================================================
+    // GLOBAL_COMMAND sending (reliable)
+    // ============================================================
+    void NetworkingSystem::SendSceneChange(int sceneIndex)
+    {
+        GlobalCommandPayload p{};
+        p.commandType = (uint8_t)GlobalCommandType::SceneChange;
+        p.sceneIndex = sceneIndex;
+        SendGlobalCommand(p);
+    }
+
+    void NetworkingSystem::SendGravityEnabled(bool enabled)
+    {
+        GlobalCommandPayload p{};
+        p.commandType = (uint8_t)GlobalCommandType::GravityOnOff;
+        p.gravityEnabled = enabled ? 1 : 0;
+        SendGlobalCommand(p);
+    }
+
+    bool NetworkingSystem::PopReceivedGlobalCommand(GlobalCommandPayload& out)
+    {
+        if (!m_hasPendingGlobal.exchange(false, std::memory_order_acq_rel))
+            return false;
+
+        out = m_pendingGlobal;
+        return true;
+    }
+
+    void NetworkingSystem::SendGlobalCommand(const GlobalCommandPayload& payload)
     {
         for (auto& peer : m_peers)
         {
@@ -271,14 +306,61 @@ namespace Net
             hdr.peerId = (uint8_t)m_localPeerId;
             hdr.seq = peer.nextSeq++;
 
-            GlobalCommandPayload payload{};
-            payload.commandType = commandType;
-
             char buffer[256];
             memcpy(buffer, &hdr, sizeof(hdr));
             memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
 
-            SendReliable(m_socket, peer, buffer, sizeof(hdr) + sizeof(payload));
+            SendReliable(m_socket, peer, buffer, (int)(sizeof(hdr) + sizeof(payload)));
         }
     }
-} 
+
+    // ============================================================
+    // STATE_SNAPSHOT sending (unreliable)
+    // ============================================================
+    void NetworkingSystem::SendStateSnapshot(uint32_t tick, const StateSnapshotItem* items, uint16_t count)
+    {
+        if (!items || count == 0)
+            return;
+
+        // Compute packet size and ensure it fits MTU-ish buffer.
+        const int bytes =
+            (int)sizeof(MsgHeader) +
+            (int)sizeof(StateSnapshotHeader) +
+            (int)count * (int)sizeof(StateSnapshotItem);
+
+        if (bytes > (int)sizeof(m_recvBuffer))
+        {
+            std::cout << "[NET] STATE_SNAPSHOT too large: " << bytes << " bytes (count=" << count << ")\n";
+            return;
+        }
+
+        char buffer[1500];
+
+        MsgHeader hdr{};
+        hdr.msgType = (uint8_t)MsgType::STATE_SNAPSHOT;
+        hdr.peerId = (uint8_t)m_localPeerId;
+        hdr.tick = tick;
+
+        StateSnapshotHeader sh{};
+        sh.count = count;
+
+        memcpy(buffer, &hdr, sizeof(hdr));
+        memcpy(buffer + sizeof(hdr), &sh, sizeof(sh));
+        memcpy(buffer + sizeof(hdr) + sizeof(sh), items, count * sizeof(StateSnapshotItem));
+
+        for (auto& peer : m_peers)
+        {
+            m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
+        }
+    }
+
+    bool NetworkingSystem::PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick)
+    {
+        if (!m_hasPendingSnapshot.exchange(false, std::memory_order_acq_rel))
+            return false;
+
+        outTick = m_pendingSnapshotTick;
+        outItems = m_pendingSnapshotItems;
+        return true;
+    }
+}

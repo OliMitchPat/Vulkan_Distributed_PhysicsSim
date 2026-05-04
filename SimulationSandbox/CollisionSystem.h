@@ -42,11 +42,16 @@ public:
             }
         }
 
-        // Critical: sync ECS transform from physics bodies after collision response
+        // Milestone 5: only authoritative dynamic bodies should drive ECS transforms here.
+        // Replicas are kinematic and should be driven by received snapshots (not by collision).
         world.forEach<TransformComponent, PhysicsComponent>(
             [&](Entity, TransformComponent& tr, PhysicsComponent& phys)
             {
+                if (!phys.body.IsDynamic())
+                    return;
+
                 tr.position = phys.body.Position();
+                // (Rotation sync is done in PhysicsSystem.Update; keep minimal here.)
             });
     }
 
@@ -141,18 +146,6 @@ private:
     void PushContact(const AnyShape& a, const AnyShape& b, const CollisionManifold& m)
     {
         if (!m.hit) return;
-
-        // DEBUG: only print for Sphere vs Plane to reduce spam
-        if ((a.kind == ShapeKind::Sphere && b.kind == ShapeKind::Plane) ||
-            (a.kind == ShapeKind::Plane && b.kind == ShapeKind::Sphere))
-        {
-            printf("[Contact] %s-%s pen=%.6f n=(%.3f,%.3f,%.3f) p=(%.3f,%.3f,%.3f)\n",
-                (a.kind == ShapeKind::Sphere ? "Sphere" : "Plane"),
-                (b.kind == ShapeKind::Plane ? "Plane" : "Sphere"),
-                m.penetration,
-                m.normal.x, m.normal.y, m.normal.z,
-                m.contactPoint.x, m.contactPoint.y, m.contactPoint.z);
-        }
 
         m_contacts.push_back({ a.br.body, b.br.body, m, CombineMaterial(a.br, b.br) });
     }
@@ -433,7 +426,6 @@ private:
     static CollisionManifold ContainInContainer(const AnyShape& inner, const AnyShape& outer)
     {
         // NOTE: containment manifolds have their own conventions; leave as-is for now.
-        // If you later see "container pushes outward", we can apply the same A->B forcing idea here.
         switch (outer.kind)
         {
         case ShapeKind::Sphere:

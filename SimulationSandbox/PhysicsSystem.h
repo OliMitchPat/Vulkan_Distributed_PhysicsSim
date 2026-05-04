@@ -1,9 +1,11 @@
+#pragma once
+
 #include <glm/glm.hpp>
 #include "World.h"
 #include "Components.h"
 #include "RigidBody.h"
 #include "BodySetup.h"
-#include "ShapeData.h" 
+#include "ShapeData.h"
 
 class PhysicsSystem
 {
@@ -45,7 +47,27 @@ public:
                         }, shape->shape);
                 }
 
-                // >>> INSERT DAMPING HERE <<<
+                // --------------------------------------------------
+                // Milestone 5: Ownership -> motion type mapping
+                //
+                // Convention:
+                // - OwnerComponent.ownerId == -1 => owned by all (static/animated/local)
+                // - OwnerComponent.ownerId >= 0  => simulated object owned by a peer
+                //
+                // Local peer id from config is 1..4.
+                // We assume ownerId is stored as 0..3 (ObjectOwnerType - 1).
+                // --------------------------------------------------
+                if (auto* owner = world.getComponent<OwnerComponent>(e))
+                {
+                    if (owner->ownerId >= 0)
+                    {
+                        const bool isOwned = (owner->ownerId == (m_localPeerId - 1));
+                        phys.body.SetMotionType(isOwned ? BodyMotionType::Dynamic
+                            : BodyMotionType::Kinematic);
+                    }
+                }
+
+                // Damping: only meaningful for dynamic bodies
                 if (phys.body.IsDynamic())
                 {
                     phys.body.SetLinearDamping(0.03f);
@@ -61,7 +83,7 @@ public:
             });
 
         // --------------------------------------------------
-        // 1. APPLY FORCES
+        // 1. APPLY FORCES (owned dynamics only)
         // --------------------------------------------------
         world.forEach<PhysicsComponent>(
             [&](Entity, PhysicsComponent& phys)
@@ -73,25 +95,31 @@ public:
             });
 
         // --------------------------------------------------
-        // 2. INTEGRATE
+        // 2. INTEGRATE (owned dynamics only)
         // --------------------------------------------------
         world.forEach<PhysicsComponent>(
             [&](Entity, PhysicsComponent& phys)
             {
+                if (!phys.body.IsDynamic()) return;
                 phys.body.Integrate(dt, m_integrator);
             });
 
         // --------------------------------------------------
         // 3. SYNC BACK TO ECS
+        //
+        // For Milestone 5:
+        // - Owned dynamics should drive transforms.
+        // - Replicas (kinematic) will be driven by received snapshots later.
         // --------------------------------------------------
         world.forEach<TransformComponent, PhysicsComponent>(
             [&](Entity e, TransformComponent& tr, PhysicsComponent& phys)
             {
-                // Update transform from physics
+                if (!phys.body.IsDynamic())
+                    return;
+
                 tr.position = phys.body.Position();
                 tr.rotation = glm::eulerAngles(phys.body.Orientation());
 
-                // Optional: write back velocities
                 if (auto* vel = world.getComponent<VelocityComponent>(e))
                 {
                     vel->linearVelocity = phys.body.LinearVelocity();
@@ -109,7 +137,13 @@ public:
     void SetGravityEnabled(bool enabled) { m_gravityEnabled = enabled; }
     bool IsGravityEnabled() const { return m_gravityEnabled; }
 
+    // Milestone 5: used to decide authoritative ownership
+    void SetLocalPeerId(int peerId_1_to_4) { m_localPeerId = peerId_1_to_4; }
+    int  GetLocalPeerId() const { return m_localPeerId; }
+
 private:
     IntegratorType m_integrator = IntegratorType::Euler;
     bool m_gravityEnabled = true;
+
+    int m_localPeerId = 1; // config peer_id (1..4)
 };

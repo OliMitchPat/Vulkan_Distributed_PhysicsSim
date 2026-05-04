@@ -46,6 +46,11 @@ enum class ParticleType
     Spark
 };
 
+struct OwnerComponent
+{
+    int ownerId = -1; // -1 = owned by all / local copy
+};
+
 // --------------------------------------------------
 // PhysicsComponent
 // --------------------------------------------------

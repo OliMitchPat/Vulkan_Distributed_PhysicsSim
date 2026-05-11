@@ -425,16 +425,17 @@ private:
 
     static CollisionManifold ContainInContainer(const AnyShape& inner, const AnyShape& outer)
     {
-        // NOTE: containment manifolds have their own conventions; leave as-is for now.
+        CollisionManifold m{};
+
         switch (outer.kind)
         {
         case ShapeKind::Sphere:
             switch (inner.kind)
             {
-            case ShapeKind::Sphere:   return Contain(inner.sphere, outer.sphere);
-            case ShapeKind::Capsule:  return Contain(inner.capsule, outer.sphere);
-            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.sphere);
-            case ShapeKind::OBB:      return Contain(inner.obb, outer.sphere);
+            case ShapeKind::Sphere:   m = Contain(inner.sphere, outer.sphere); break;
+            case ShapeKind::Capsule:  m = Contain(inner.capsule, outer.sphere); break;
+            case ShapeKind::Cylinder: m = Contain(inner.cylinder, outer.sphere); break;
+            case ShapeKind::OBB:      m = Contain(inner.obb, outer.sphere); break;
             default: break;
             }
             break;
@@ -442,10 +443,10 @@ private:
         case ShapeKind::OBB:
             switch (inner.kind)
             {
-            case ShapeKind::Sphere:   return Contain(inner.sphere, outer.obb);
-            case ShapeKind::Capsule:  return Contain(inner.capsule, outer.obb);
-            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.obb);
-            case ShapeKind::OBB:      return Contain(inner.obb, outer.obb);
+            case ShapeKind::Sphere:   m = Contain(inner.sphere, outer.obb); break;
+            case ShapeKind::Capsule:  m = Contain(inner.capsule, outer.obb); break;
+            case ShapeKind::Cylinder: m = Contain(inner.cylinder, outer.obb); break;
+            case ShapeKind::OBB:      m = Contain(inner.obb, outer.obb); break;
             default: break;
             }
             break;
@@ -453,10 +454,10 @@ private:
         case ShapeKind::Cylinder:
             switch (inner.kind)
             {
-            case ShapeKind::Sphere:   return Contain(inner.sphere, outer.cylinder);
-            case ShapeKind::Capsule:  return Contain(inner.capsule, outer.cylinder);
-            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.cylinder);
-            case ShapeKind::OBB:      return Contain(inner.obb, outer.cylinder);
+            case ShapeKind::Sphere:   m = Contain(inner.sphere, outer.cylinder); break;
+            case ShapeKind::Capsule:  m = Contain(inner.capsule, outer.cylinder); break;
+            case ShapeKind::Cylinder: m = Contain(inner.cylinder, outer.cylinder); break;
+            case ShapeKind::OBB:      m = Contain(inner.obb, outer.cylinder); break;
             default: break;
             }
             break;
@@ -464,16 +465,25 @@ private:
         case ShapeKind::Plane:
             switch (inner.kind)
             {
-            case ShapeKind::Sphere:   return Contain(inner.sphere, outer.plane);
-            case ShapeKind::Capsule:  return Contain(inner.capsule, outer.plane);
-            case ShapeKind::Cylinder: return Contain(inner.cylinder, outer.plane);
-            case ShapeKind::OBB:      return Contain(inner.obb, outer.plane);
+            case ShapeKind::Sphere:   m = Contain(inner.sphere, outer.plane); break;
+            case ShapeKind::Capsule:  m = Contain(inner.capsule, outer.plane); break;
+            case ShapeKind::Cylinder: m = Contain(inner.cylinder, outer.plane); break;
+            case ShapeKind::OBB:      m = Contain(inner.obb, outer.plane); break;
             default: break;
             }
             break;
 
         default: break;
         }
-        return {};
+
+        if (m.hit)
+        {
+            // Containment routines return an inward correction direction for the inner body.
+            // ResolveContact expects manifold normal in A->B order (A=inner solid, B=container),
+            // so flip once here before pushing solver contacts.
+            m.normal = -m.normal;
+        }
+
+        return m;
     }
 };

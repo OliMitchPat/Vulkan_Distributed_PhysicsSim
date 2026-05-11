@@ -69,28 +69,6 @@ namespace
         }, shape);
     }
 
-    // Scale the shape dimensions by the uniform scale derived from the transform.
-    ShapeData ScaleShape(const ShapeData& shape, float u)
-    {
-        return std::visit([u](auto&& s) -> ShapeData
-        {
-            using T = std::decay_t<decltype(s)>;
-            if constexpr (std::is_same_v<T, SphereShape>)
-                return SphereShape{ s.radius * u };
-            if constexpr (std::is_same_v<T, CuboidShape>)
-                return CuboidShape{ s.size * u };
-            if constexpr (std::is_same_v<T, CylinderShape>)
-                return CylinderShape{ s.radius * u, s.height * u };
-            if constexpr (std::is_same_v<T, CapsuleShape>)
-                return CapsuleShape{ s.radius * u, s.height * u };
-            if constexpr (std::is_same_v<T, PlaneShape>)
-                return s;  // plane: scale doesn't change the normal
-            return s;
-        }, shape);
-    }
-
-
-
     // Short string describing a shape for the scene dump log
     std::string ShapeDumpStr(const ShapeData& shape, float uniformScale)
     {
@@ -321,12 +299,6 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
         std::string objName = SimIO::ToStdStringOrEmpty(obj->name());
         if (objName.empty())
             objName = "object " + std::to_string(i);
-        // >>> TEMP DEBUG: skip CONTAINER objects to test if container collision is the cause
-        if (obj->collision_type() == Simulation::CollisionType_CONTAINER)
-        {
-            std::cout << "DBG: skipping CONTAINER object [" << i << "] \"" << objName << "\"\n";
-            continue;
-        }
         // ----- Material -----
         const std::string matName = obj->material()
                                         ? obj->material()->str()
@@ -343,27 +315,6 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 
         // ----- Shape -----
         const ShapeData rawShape  = SimIO::ToShapeData(obj);
-        const ShapeData shape     = ScaleShape(rawShape, uniformScale);
-
-
-        if (obj->shape_type() == Simulation::Shape_Sphere)
-        {
-            const auto* s = obj->shape_as_Sphere();
-            const float r = s ? s->radius() : -1.0f;
-
-            std::cout << "    DBG pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
-                << " yaw/pitch/roll=("
-                << fbTransform->orientation().yaw() << ","
-                << fbTransform->orientation().pitch() << ","
-                << fbTransform->orientation().roll() << ")"
-                << " scale=("
-                << fbTransform->scale().x() << ","
-                << fbTransform->scale().y() << ","
-                << fbTransform->scale().z() << ")"
-                << " uniformScale=" << uniformScale
-                << " rawR=" << r
-                << "\n";
-        }
 
 
         // ----- Behaviour / collision type -----
@@ -423,7 +374,9 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
         // ----- ShapeComponent -----
         {
             ShapeComponent sc{};
-            sc.shape         = shape;
+            // FlatBuffer policy: keep authored (raw) shape dimensions here.
+            // Collision scaling is applied once via TransformComponent.scale.
+            sc.shape         = rawShape;
             sc.collisionType = colType;
             world.addComponent(e, sc);
         }
@@ -460,8 +413,6 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
                     return LookupDensity(densityMap, name);
                 });
 
-            const glm::vec3 p = phys.body.Position(); // or whatever accessor exists
-            std::cout << "    DBG bodyPos=(" << p.x << "," << p.y << "," << p.z << ")\n";
             world.addComponent(e, phys);
         }
     }

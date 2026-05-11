@@ -5,6 +5,8 @@
 
 #include "WorldShapes.h"
 #include "Containment.h"
+#include "RigidBody.h"
+#include "PositionalCorrection.h"
 #include "TestUtils.h"
 
 TEST(Containment_SphereContainer, NoHit_SphereFullyInside)
@@ -25,6 +27,31 @@ TEST(Containment_SphereContainer, Hit_SphereOutside)
 
     ExpectVec3Near(m.normal, glm::vec3(-1, 0, 0), 1e-4f); // push back toward center
     EXPECT_NEAR(m.penetration, 0.5f, 1e-4f);
+}
+
+TEST(Containment_SphereContainer, FlippedNormalMatchesResolveContactCorrectionDirection)
+{
+    // Outside on +X: Contain() returns inward normal (-X). CollisionSystem flips it
+    // before ResolveContact so positional correction moves the inner body inward.
+    WorldSphere container{ glm::vec3(0,0,0), 10.0f };
+    WorldSphere inner{ glm::vec3(9.5f,0,0), 1.0f };
+
+    CollisionManifold m = Contain(inner, container);
+    ASSERT_TRUE(m.hit);
+
+    RigidBody innerBody;
+    innerBody.SetMotionType(BodyMotionType::Dynamic);
+    innerBody.SetMass(1.0f);
+    innerBody.SetPosition(inner.center);
+
+    RigidBody containerBody;
+    containerBody.SetMotionType(BodyMotionType::Static);
+    containerBody.SetPosition(container.center);
+
+    m.normal = -m.normal; // same convention fix applied in CollisionSystem::ContainInContainer
+    PositionalCorrection(innerBody, containerBody, m, 1.0f, 0.0f);
+
+    EXPECT_LT(innerBody.Position().x, inner.center.x);
 }
 
 TEST(Containment_SphereContainer, Hit_CapsuleOutside_UsesWorstEndpoint)

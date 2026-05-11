@@ -1,5 +1,6 @@
 #include "NetworkingSystem.h"
 #include "NetAddress.h"
+
 #include <iostream>
 #include <cstring>
 #include <algorithm>
@@ -7,8 +8,43 @@
 namespace Net
 {
     // ============================================================
-    // Internal helper: find peer by id
+    // Endpoint comparison + peer lookup helpers
     // ============================================================
+
+    static bool SockAddrEqualEndpoint(const sockaddr_storage& a, const sockaddr_storage& b)
+    {
+        if (a.ss_family != b.ss_family) return false;
+
+        if (a.ss_family == AF_INET)
+        {
+            const sockaddr_in* aa = reinterpret_cast<const sockaddr_in*>(&a);
+            const sockaddr_in* bb = reinterpret_cast<const sockaddr_in*>(&b);
+            return (aa->sin_port == bb->sin_port) &&
+                (aa->sin_addr.s_addr == bb->sin_addr.s_addr);
+        }
+
+        if (a.ss_family == AF_INET6)
+        {
+            const sockaddr_in6* aa = reinterpret_cast<const sockaddr_in6*>(&a);
+            const sockaddr_in6* bb = reinterpret_cast<const sockaddr_in6*>(&b);
+            return (aa->sin6_port == bb->sin6_port) &&
+                (std::memcmp(&aa->sin6_addr, &bb->sin6_addr, sizeof(in6_addr)) == 0);
+        }
+
+        return false;
+    }
+
+    static Peer* FindPeerByAddr(std::vector<Peer>& peers, const sockaddr_storage& from)
+    {
+        for (auto& p : peers)
+        {
+            if (p.addrLen == 0) continue;
+            if (SockAddrEqualEndpoint(from, p.addr))
+                return &p;
+        }
+        return nullptr;
+    }
+
     static Peer* FindPeerById(std::vector<Peer>& peers, int peerId)
     {
         for (auto& p : peers)
@@ -18,66 +54,7 @@ namespace Net
     }
 
     // ============================================================
-    // Init
-    // ============================================================
-    bool NetworkingSystem::Init(const PeerConfig& cfg)
-    {
-        std::string err;
-        if (!m_socket.Open(cfg.bind_ip, cfg.bind_port, err))
-        {
-            std::cout << "Socket error: " << err << "\n";
-            return false;
-        }
-
-        m_localPeerId = cfg.peer_id;
-
-        for (const auto& p : cfg.RemotePeers())
-        {
-            sockaddr_storage addr{};
-            std::string err2;
-
-            if (!ResolveAddress(p.host, p.port, addr, err2))
-            {
-                std::cout << "Resolve failed: " << err2 << "\n";
-                continue;
-            }
-
-            Peer peer;
-            peer.peerId = p.peerId;
-            peer.addr = addr;
-
-            m_peers.push_back(peer);
-        }
-
-        SendHello();
-        return true;
-    }
-
-    // ============================================================
-    // Shutdown
-    // ============================================================
-    void NetworkingSystem::Shutdown()
-    {
-        m_socket.Close();
-    }
-
-    // ============================================================
-    // Send HELLO (unreliable is fine)
-    // ============================================================
-    void NetworkingSystem::SendHello()
-    {
-        MsgHeader msg{};
-        msg.msgType = (uint8_t)MsgType::HELLO;
-        msg.peerId = (uint8_t)m_localPeerId;
-
-        for (auto& p : m_peers)
-        {
-            m_socket.Send(p.addr, p.addrLen, &msg, (int)sizeof(msg));
-        }
-    }
-
-    // ============================================================
-    // Send ACK
+    // ACK sender
     // ============================================================
     static void SendAck(UdpSocket& socket, Peer& peer, int localPeerId, uint32_t seq)
     {
@@ -90,7 +67,7 @@ namespace Net
     }
 
     // ============================================================
-    // Send Reliable Message
+    // Reliable send helper (enqueue for retransmit)
     // ============================================================
     static void SendReliable(UdpSocket& socket, Peer& peer, const void* data, int size)
     {
@@ -107,6 +84,64 @@ namespace Net
     }
 
     // ============================================================
+    // Init / Shutdown
+    // ============================================================
+    bool NetworkingSystem::Init(const PeerConfig& cfg)
+    {
+        std::string err;
+        if (!m_socket.Open(cfg.bind_ip, cfg.bind_port, err))
+        {
+            std::cout << "Socket error: " << err << "\n";
+            return false;
+        }
+
+        m_localPeerId = cfg.peer_id;
+
+        m_peers.clear();
+        for (const auto& p : cfg.RemotePeers())
+        {
+            if (p.peerId == cfg.peer_id)
+                continue;
+
+            sockaddr_storage addr{};
+            std::string err2;
+
+            if (!ResolveAddress(p.host, p.port, addr, err2))
+            {
+                std::cout << "Resolve failed: " << err2 << "\n";
+                continue;
+            }
+
+            Peer peer;
+            peer.peerId = p.peerId;
+            peer.addr = addr;
+            peer.addrLen = Net::SockaddrLen(addr);
+            m_peers.push_back(peer);
+        }
+
+        SendHello();
+        return true;
+    }
+
+    void NetworkingSystem::Shutdown()
+    {
+        m_socket.Close();
+    }
+
+    // ============================================================
+    // Send HELLO (unreliable)
+    // ============================================================
+    void NetworkingSystem::SendHello()
+    {
+        MsgHeader msg{};
+        msg.msgType = (uint8_t)MsgType::HELLO;
+        msg.peerId = (uint8_t)m_localPeerId;
+
+        for (auto& p : m_peers)
+            m_socket.Send(p.addr, p.addrLen, &msg, (int)sizeof(msg));
+    }
+
+    // ============================================================
     // Update
     // ============================================================
     void NetworkingSystem::Update(float dt)
@@ -117,11 +152,27 @@ namespace Net
         int size = 0;
         while ((size = m_socket.Receive(from, m_recvBuffer, (int)sizeof(m_recvBuffer))) > 0)
         {
+            // Optional: lightweight debug for GLOBAL_COMMAND only
+            if (size >= (int)sizeof(MsgHeader))
+            {
+                const MsgHeader* h = reinterpret_cast<const MsgHeader*>(m_recvBuffer);
+                if (h->protocolVersion == PROTOCOL_VERSION &&
+                    (MsgType)h->msgType == MsgType::GLOBAL_COMMAND)
+                {
+                    std::cout
+                        << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% GOT GLOBAL_COMMAND"
+                        << " size=" << size
+                        << " fromPeerId=" << (int)h->peerId
+                        << " seq=" << h->seq
+                        << "\n";
+                }
+            }
+
             HandlePacket(from, m_recvBuffer, size);
         }
 
         // ---- Resend logic (reliable queue) ----
-        constexpr float RESEND_INTERVAL_SEC = 0.5f;
+        constexpr float RESEND_INTERVAL_SEC = 0.05f;
         constexpr int   MAX_RETRIES = 10;
 
         for (auto& peer : m_peers)
@@ -168,17 +219,21 @@ namespace Net
         if (hdr->protocolVersion != PROTOCOL_VERSION)
             return;
 
-        // Basic sanity: ignore invalid/self
-        if (hdr->peerId == 0 || (int)hdr->peerId == m_localPeerId)
+        if (hdr->peerId == 0)
             return;
 
-        Peer* peer = FindPeerById(m_peers, (int)hdr->peerId);
+        Peer* peer = FindPeerByAddr(m_peers, from);
         if (!peer)
-            return;
+        {
+            peer = FindPeerById(m_peers, (int)hdr->peerId);
+            if (!peer) return;
 
-        // Learn/update the sender address so ACKs/resends go to the correct endpoint.
-        peer->addr = from;
-        peer->addrLen = Net::SockaddrLen(from);
+            // Learn sender endpoint (so future ACKs/resends go to the right place)
+            peer->addr = from;
+            peer->addrLen = Net::SockaddrLen(from);
+        }
+        // Safety: ensure the endpoint-mapped peer id matches the header.
+        // Prevents accidentally clearing a wrong peer's resend queue.
 
         switch ((MsgType)hdr->msgType)
         {
@@ -203,22 +258,33 @@ namespace Net
 
         case MsgType::ACK:
         {
+            const uint32_t ackSeq = hdr->ack;
+
             auto& queue = peer->resendQueue;
+            const size_t before = queue.size();
 
             queue.erase(
                 std::remove_if(queue.begin(), queue.end(),
-                    [&](const PendingMessage& m)
-                    {
-                        return m.seq == hdr->ack;
-                    }),
+                    [&](const PendingMessage& m) { return m.seq == ackSeq; }),
                 queue.end());
+
+            const size_t after = queue.size();
+
+            std::cout << "[ACK] recv from hdrPeerId=" << (int)hdr->peerId
+                << " mappedPeer=" << peer->peerId
+                << " ackSeq=" << ackSeq
+                << " q " << before << " -> " << after << "\n";
             break;
         }
-
         case MsgType::GLOBAL_COMMAND:
         {
             // Always ACK reliable messages (even duplicates)
             SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
+
+            std::cout << "///////////////////////////////////////////////////////////////////// RAW GLOBAL from peer=" << (int)hdr->peerId
+                << " seq=" << hdr->seq
+                << " last=" << peer->lastReceivedSeq
+                << " size=" << size << "\n";
 
             // Duplicate suppression
             if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)
@@ -235,13 +301,11 @@ namespace Net
             // Store latest for PopReceivedGlobalCommand()
             m_pendingGlobal = *payload;
             m_hasPendingGlobal.store(true, std::memory_order_release);
-
             break;
         }
 
         case MsgType::STATE_SNAPSHOT:
         {
-            // Unreliable: no ACK, no seq checks. Use tick for ordering if desired.
             if (size < (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader)))
                 break;
 
@@ -249,18 +313,18 @@ namespace Net
                 reinterpret_cast<const StateSnapshotHeader*>(data + sizeof(MsgHeader));
 
             const int count = (int)sh->count;
-            const int expectedSize = (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader) + count * sizeof(StateSnapshotItem));
+            const int expectedSize =
+                (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader) + count * sizeof(StateSnapshotItem));
+
             if (count < 0 || expectedSize > size)
                 break;
 
             const StateSnapshotItem* items =
                 reinterpret_cast<const StateSnapshotItem*>(data + sizeof(MsgHeader) + sizeof(StateSnapshotHeader));
 
-            // Store latest snapshot (single-slot mailbox)
             m_pendingSnapshotTick = hdr->tick;
             m_pendingSnapshotItems.assign(items, items + count);
             m_hasPendingSnapshot.store(true, std::memory_order_release);
-
             break;
         }
 
@@ -307,8 +371,8 @@ namespace Net
             hdr.seq = peer.nextSeq++;
 
             char buffer[256];
-            memcpy(buffer, &hdr, sizeof(hdr));
-            memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
+            std::memcpy(buffer, &hdr, sizeof(hdr));
+            std::memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
 
             SendReliable(m_socket, peer, buffer, (int)(sizeof(hdr) + sizeof(payload)));
         }
@@ -322,7 +386,6 @@ namespace Net
         if (!items || count == 0)
             return;
 
-        // Compute packet size and ensure it fits MTU-ish buffer.
         const int bytes =
             (int)sizeof(MsgHeader) +
             (int)sizeof(StateSnapshotHeader) +
@@ -344,14 +407,12 @@ namespace Net
         StateSnapshotHeader sh{};
         sh.count = count;
 
-        memcpy(buffer, &hdr, sizeof(hdr));
-        memcpy(buffer + sizeof(hdr), &sh, sizeof(sh));
-        memcpy(buffer + sizeof(hdr) + sizeof(sh), items, count * sizeof(StateSnapshotItem));
+        std::memcpy(buffer, &hdr, sizeof(hdr));
+        std::memcpy(buffer + sizeof(hdr), &sh, sizeof(sh));
+        std::memcpy(buffer + sizeof(hdr) + sizeof(sh), items, count * sizeof(StateSnapshotItem));
 
         for (auto& peer : m_peers)
-        {
             m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
-        }
     }
 
     bool NetworkingSystem::PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick)
@@ -363,4 +424,5 @@ namespace Net
         outItems = m_pendingSnapshotItems;
         return true;
     }
+
 }

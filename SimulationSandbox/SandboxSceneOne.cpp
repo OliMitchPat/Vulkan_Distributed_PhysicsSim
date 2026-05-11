@@ -85,7 +85,7 @@ struct SimSharedState
     // Scene switching: render thread writes, sim thread reads and acts
     std::atomic<int> requestedSceneIndex{ -1 };
 
-    // Gravity enable flag: updated by sim thread after scene switch and by GLOBAL command
+    // Gravity enable flag: controlled globally (and applied by sim thread)
     std::atomic<bool> gravityOn{ true };
 
     // Local UI (per peer only): display mode
@@ -404,15 +404,28 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             {
                 if (desired != scenarios.CurrentIndex())
                 {
+                    const ULONGLONG t = GetTickCount64();
+                    std::cout << "[T] SIM applying scene idx=" << desired
+                        << " t=" << t << "ms\n";
                     scenarios.SwitchTo(world, desired);
                     accumulator = 0.0f;
 
-                    // Scene default gravity (note: this may override global gravity policy)
-                    const bool grav = scenarios.Current()
-                        ? scenarios.Current()->GravityOn()
-                        : true;
+                    // Keep current GLOBAL gravity policy across scene switches
+                    const bool grav = shared.gravityOn.load(std::memory_order_relaxed);
                     physicsSystem.SetGravityEnabled(grav);
-                    shared.gravityOn.store(grav, std::memory_order_relaxed);
+
+                    // IMPORTANT: clear replication state so old-scene object IDs/states
+                    // don't bleed into the newly loaded scene.
+                    {
+                        std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                        shared.inReplicaLatest.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                        shared.outOwnedItems.clear();
+                        shared.outTick = 0;
+                        shared.outDirty = false;
+                    }
                 }
 
                 shared.requestedSceneIndex.compare_exchange_strong(
@@ -451,12 +464,6 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                 tr->position = st.pos;
                 tr->rotation = glm::eulerAngles(st.rot);
-
-                if (id == 0 && (tickNumber % 60 == 0))
-                {
-                   /* std::cout << "[SIM] apply replica id=0 tick=" << st.tick
-						<< " pos=(" << st.pos.x << "," << st.pos.y << "," << st.pos.z << ")\n"; */
-                }
             }
         }
 
@@ -553,6 +560,11 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
     LoopController lc(shared.targetNetworkHz.load(std::memory_order_relaxed));
 
+    // Snapshot send throttling (prevents UDP flood starving GLOBAL commands)
+    float snapshotSendAccum = 0.0f;
+    constexpr float SNAPSHOT_SEND_HZ = 20.0f;                 // tune: 15–30 is usually fine
+    constexpr float SNAPSHOT_SEND_INTERVAL = 1.0f / SNAPSHOT_SEND_HZ;
+
     while (shared.appRunning.load(std::memory_order_relaxed))
     {
         lc.setTargetHz(shared.targetNetworkHz.load(std::memory_order_relaxed));
@@ -581,6 +593,10 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
         {
             const auto type = (GlobalCommandType)cmd.commandType;
 
+            const ULONGLONG t = GetTickCount64();
+            std::cout << "[T] NET popped GLOBAL cmd scene=" << cmd.sceneIndex
+                << " t=" << t << "ms\n";
+
             if (type == GlobalCommandType::SceneChange)
             {
                 shared.pendingSceneIndex.store(cmd.sceneIndex, std::memory_order_relaxed);
@@ -593,8 +609,14 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             }
         }
 
-        // ---- Milestone 5: send STATE_SNAPSHOT once per networking tick ----
+        // ---- Milestone 5: send STATE_SNAPSHOT (throttled) ----
+        snapshotSendAccum += dt;
+
+        if (snapshotSendAccum >= SNAPSHOT_SEND_INTERVAL)
         {
+            // keep leftover time (more stable than setting to 0)
+            snapshotSendAccum -= SNAPSHOT_SEND_INTERVAL;
+
             std::vector<StateSnapshotItem> items;
             uint32_t tick = 0;
             bool dirty = false;
@@ -604,7 +626,7 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
                 dirty = shared.outDirty;
                 if (dirty)
                 {
-                    items = shared.outOwnedItems; // copy
+                    items = shared.outOwnedItems; // copy latest
                     tick = shared.outTick;
                     shared.outDirty = false;
                 }
@@ -623,11 +645,6 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
             while (net.PopReceivedStateSnapshot(items, tick))
             {
-               /* std::cout << "[NET] SNAP recv tick=" << tick
-                    << " count=" << items.size()
-                    << " firstId=" << (items.empty() ? 0 : items[0].objectId)
-                    << "\n";
-                    */
                 std::lock_guard<std::mutex> lk(shared.inSnapMutex);
 
                 for (const auto& it : items)
@@ -888,6 +905,10 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     {
                         if (si != currentIdx)
                         {
+                            const ULONGLONG t = GetTickCount64();
+                            std::cout << "[T] UI scene click idx=" << si
+                                << " t=" << t << "ms\n";
+
                             // Apply locally immediately
                             shared.requestedSceneIndex.store(si, std::memory_order_release);
 
@@ -897,6 +918,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                         }
                     }
                 }
+            
 
                 ImGui::Separator();
 

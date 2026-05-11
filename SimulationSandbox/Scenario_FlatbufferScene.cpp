@@ -307,7 +307,9 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
     // world.Clear() has already been called by ScenarioManager before OnLoad.
     // nextEntity starts at 0, so the first createEntity() yields 0 which
     // matches object index 0, giving identical IDs across all peers.
+    // 
     //
+
     const unsigned objectCount = scene->objects()->size();
 
     for (unsigned i = 0; i < objectCount; ++i)
@@ -319,7 +321,12 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
         std::string objName = SimIO::ToStdStringOrEmpty(obj->name());
         if (objName.empty())
             objName = "object " + std::to_string(i);
-
+        // >>> TEMP DEBUG: skip CONTAINER objects to test if container collision is the cause
+        if (obj->collision_type() == Simulation::CollisionType_CONTAINER)
+        {
+            std::cout << "DBG: skipping CONTAINER object [" << i << "] \"" << objName << "\"\n";
+            continue;
+        }
         // ----- Material -----
         const std::string matName = obj->material()
                                         ? obj->material()->str()
@@ -337,6 +344,27 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
         // ----- Shape -----
         const ShapeData rawShape  = SimIO::ToShapeData(obj);
         const ShapeData shape     = ScaleShape(rawShape, uniformScale);
+
+
+        if (obj->shape_type() == Simulation::Shape_Sphere)
+        {
+            const auto* s = obj->shape_as_Sphere();
+            const float r = s ? s->radius() : -1.0f;
+
+            std::cout << "    DBG pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
+                << " yaw/pitch/roll=("
+                << fbTransform->orientation().yaw() << ","
+                << fbTransform->orientation().pitch() << ","
+                << fbTransform->orientation().roll() << ")"
+                << " scale=("
+                << fbTransform->scale().x() << ","
+                << fbTransform->scale().y() << ","
+                << fbTransform->scale().z() << ")"
+                << " uniformScale=" << uniformScale
+                << " rawR=" << r
+                << "\n";
+        }
+
 
         // ----- Behaviour / collision type -----
         const BehaviourType behaviour =
@@ -432,6 +460,8 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
                     return LookupDensity(densityMap, name);
                 });
 
+            const glm::vec3 p = phys.body.Position(); // or whatever accessor exists
+            std::cout << "    DBG bodyPos=(" << p.x << "," << p.y << "," << p.z << ")\n";
             world.addComponent(e, phys);
         }
     }

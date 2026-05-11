@@ -36,6 +36,29 @@ namespace Net
             return false;
         }
 
+        // ------------------------------------------------------------
+        // Socket options (important under high packet rates)
+        // ------------------------------------------------------------
+
+        // Allow quick restart (especially useful when running 4 peers)
+        {
+            int reuse = 1;
+            setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR,
+                reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+        }
+
+        // Increase UDP buffers to reduce packet drops when snapshots flood the socket.
+        // Windows may clamp these values, but even a smaller applied size helps.
+        {
+            int recvBuf = 4 * 1024 * 1024; // 4 MB
+            setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
+                reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
+
+            int sendBuf = 1 * 1024 * 1024; // 1 MB
+            setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF,
+                reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+        }
+
         const int bindLen = SockaddrLen(bindAddr);
         if (bind(m_socket, reinterpret_cast<const sockaddr*>(&bindAddr), bindLen) == SOCKET_ERROR)
         {
@@ -76,14 +99,13 @@ namespace Net
 
         if (sent != size)
         {
-            std::cout << "[NET][SEND-ERR] to=" << SockaddrToString(addr)
-                << " wanted=" << size << " sent=" << sent
-                << " WSA=" << WSAGetLastError() << "\n";
+            // Optional debug:
+            // std::cout << "[NET][SEND-ERR] to=" << SockaddrToString(addr)
+            //           << " wanted=" << size << " sent=" << sent
+            //           << " WSA=" << WSAGetLastError() << "\n";
             return false;
         }
 
-        std::cout << "[NET][SEND] to=" << SockaddrToString(addr)
-            << " bytes=" << sent << "\n";
         return true;
     }
 
@@ -105,12 +127,10 @@ namespace Net
             if (err == WSAEWOULDBLOCK)
                 return 0;
 
-            std::cout << "[NET][RECV-ERR] WSA=" << err << "\n";
+            // Optional debug:
+            // std::cout << "[NET][RECV-ERR] WSA=" << err << "\n";
             return -1;
         }
-
-        std::cout << "[NET][RECV] from=" << SockaddrToString(from)
-            << " bytes=" << result << "\n";
 
         return result;
     }

@@ -1,6 +1,7 @@
 #include "RenderSystem.h"
 #include <glm/gtc/matrix_transform.hpp>
-
+#include <vector>
+#include <iostream>
 // Helper to find active camera entity by role
 static Entity findActiveCameraEntity(World& world, CameraRole role)
 {
@@ -113,15 +114,54 @@ void RenderSystem::buildInstances(World& world, RenderScene& scene) const
             if (!transform || !material)
                 return;
 
+     
             RenderInstance inst{};
 
-            // Model matrix from Transform
+            glm::vec3 visualScale = transform->scale;
+
+            if (auto* shape = world.getComponent<ShapeComponent>(e))
+            {
+                std::visit([&](auto&& s)
+                    {
+                        using T = std::decay_t<decltype(s)>;
+
+                        if constexpr (std::is_same_v<T, SphereShape>)
+                        {
+                            // sphere.obj base radius = 1.0
+                            visualScale *= glm::vec3(s.radius);
+                        }
+                        else if constexpr (std::is_same_v<T, CuboidShape>)
+                        {
+                            // cube.obj base half-extents = 1.0 => base size = 2.0
+                            visualScale *= (0.5f * s.size);
+                        }
+                        else if constexpr (std::is_same_v<T, CylinderShape>)
+                        {
+                            // No dedicated cylinder mesh yet (Scenario uses sphere.obj as placeholder),
+                            // but keep a reasonable scale so it is not wildly oversized.
+                            // If a proper cylinder mesh is added later, revisit this mapping.
+                            visualScale *= glm::vec3(s.radius, 0.5f * s.height, s.radius);
+                        }
+                        else if constexpr (std::is_same_v<T, CapsuleShape>)
+                        {
+                            // Placeholder mapping; Scenario uses sphere.obj for now.
+                            // Approximate capsule by its bounding dimensions.
+                            const float halfH = 0.5f * s.height;
+                            visualScale *= glm::vec3(s.radius, (halfH + s.radius), s.radius);
+                        }
+                        else if constexpr (std::is_same_v<T, PlaneShape>)
+                        {
+                            // Planes are rendered with Plane.obj; keep transform scale only.
+                        }
+                    }, shape->shape);
+            }
+
             glm::mat4 M{ 1.0f };
             M = glm::translate(M, transform->position);
             M = glm::rotate(M, transform->rotation.y, glm::vec3(0, 1, 0));
             M = glm::rotate(M, transform->rotation.x, glm::vec3(1, 0, 0));
             M = glm::rotate(M, transform->rotation.z, glm::vec3(0, 0, 1));
-            M = glm::scale(M, transform->scale);
+            M = glm::scale(M, visualScale);
             inst.model = M;
 
             inst.meshName = meshComp.meshName;

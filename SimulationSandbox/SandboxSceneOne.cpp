@@ -217,13 +217,73 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
             auto* mat = world.getComponent<MaterialComponent>(e);
             if (!tr || !mat) return;
 
+            // ------------------------------------------------------------
+            // Shape-aware visual scaling
+            //
+            // Mesh authoring convention in this project:
+            // - sphere.obj has diameter 2 (radius 1) in model space
+            // - cube.obj is assumed to have size 2 (half-extents 1) in model space
+            //
+            // Therefore:
+            // - SphereShape.radius scales the unit sphere mesh to world radius
+            // - CuboidShape.size scales the unit cube mesh to world size
+            //
+            // TransformComponent.scale is an additional multiplier (often 1).
+            // ------------------------------------------------------------
+            glm::vec3 visualScale = tr->scale;
+
+            if (auto* shape = world.getComponent<ShapeComponent>(e))
+            {
+                std::visit([&](auto&& s)
+                    {
+                        using T = std::decay_t<decltype(s)>;
+
+                        if constexpr (std::is_same_v<T, SphereShape>)
+                        {
+                            // sphere.obj base radius = 1.0 (diameter 2.0)
+                            visualScale *= glm::vec3(s.radius);
+                        }
+                        else if constexpr (std::is_same_v<T, CuboidShape>)
+                        {
+                            // cube.obj base size = 2.0 -> multiply by half to map authored size to desired size
+                            visualScale *= (0.5f * s.size);
+                        }
+                        else if constexpr (std::is_same_v<T, CylinderShape>)
+                        {
+                            // Placeholder: many scenes use sphere.obj for cylinder visuals.
+                            // Scale to bounding dimensions so it isn't oversized.
+                            visualScale *= glm::vec3(s.radius, 0.5f * s.height, s.radius);
+                        }
+                        else if constexpr (std::is_same_v<T, CapsuleShape>)
+                        {
+                            // Mesh base dimensions (after Blender edit)
+                            constexpr float kMeshRadius = 2.0f;
+                            constexpr float kMeshHeight = 5.0f; // TOTAL height of the mesh
+
+                            // Desired dimensions from physics shape.
+                            // If your CapsuleShape.height is cylinder-height (common):
+                            const float desiredRadius = s.radius;
+                            const float desiredTotalHeight = s.height + 2.0f * s.radius;
+
+                            // Scale mesh -> desired size
+                            visualScale.x *= desiredRadius / kMeshRadius;
+                            visualScale.z *= desiredRadius / kMeshRadius;
+                            visualScale.y *= desiredTotalHeight / kMeshHeight;
+                        }
+                        else if constexpr (std::is_same_v<T, PlaneShape>)
+                        {
+                            // Plane mesh handles its own sizing via Transform scale.
+                        }
+                    }, shape->shape);
+            }
+
             RenderInstance inst{};
             glm::mat4 M{ 1.0f };
             M = glm::translate(M, tr->position);
             M = glm::rotate(M, tr->rotation.y, glm::vec3(0, 1, 0));
             M = glm::rotate(M, tr->rotation.x, glm::vec3(1, 0, 0));
             M = glm::rotate(M, tr->rotation.z, glm::vec3(0, 0, 1));
-            M = glm::scale(M, tr->scale);
+            M = glm::scale(M, visualScale);
             inst.model = M;
 
             inst.meshName = meshComp.meshName;
@@ -410,9 +470,13 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     scenarios.SwitchTo(world, desired);
                     accumulator = 0.0f;
 
-                    // Keep current GLOBAL gravity policy across scene switches
-                    const bool grav = shared.gravityOn.load(std::memory_order_relaxed);
-                    physicsSystem.SetGravityEnabled(grav);
+                    if (scenarios.Current())
+                    {
+                        const bool grav = scenarios.Current()->GravityOn();
+                        physicsSystem.SetGravityEnabled(grav);
+                        shared.gravityOn.store(grav, std::memory_order_relaxed);
+                    }
+
 
                     // IMPORTANT: clear replication state so old-scene object IDs/states
                     // don't bleed into the newly loaded scene.

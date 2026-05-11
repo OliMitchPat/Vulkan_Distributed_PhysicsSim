@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+
 #include "World.h"
 #include "Components.h"
 #include "RigidBody.h"
@@ -27,8 +28,12 @@ public:
                 glm::quat q = glm::quat(tr.rotation);
                 phys.body.SetOrientation(q);
 
+                // Determine whether this entity is a container (must never move)
+                bool isContainer = false;
                 if (auto* shape = world.getComponent<ShapeComponent>(e))
                 {
+                    isContainer = (shape->collisionType == CollisionType::CONTAINER);
+
                     std::visit([&](auto&& s)
                         {
                             using T = std::decay_t<decltype(s)>;
@@ -47,23 +52,34 @@ public:
                         }, shape->shape);
                 }
 
-                // --------------------------------------------------
-                // Milestone 5: Ownership -> motion type mapping
-                //
-                // Convention:
-                // - OwnerComponent.ownerId == -1 => owned by all (static/animated/local)
-                // - OwnerComponent.ownerId >= 0  => simulated object owned by a peer
-                //
-                // Local peer id from config is 1..4.
-                // We assume ownerId is stored as 0..3 (ObjectOwnerType - 1).
-                // --------------------------------------------------
-                if (auto* owner = world.getComponent<OwnerComponent>(e))
+                // Containers should always be immovable colliders:
+                // - not affected by gravity
+                // - not integrated
+                // - not driven by network ownership mapping
+                if (isContainer)
                 {
-                    if (owner->ownerId >= 0)
+                    phys.body.SetMotionType(BodyMotionType::Static);
+                }
+                else
+                {
+                    // --------------------------------------------------
+                    // Milestone 5: Ownership -> motion type mapping
+                    //
+                    // Convention:
+                    // - OwnerComponent.ownerId == -1 => owned by all (static/animated/local)
+                    // - OwnerComponent.ownerId >= 0  => simulated object owned by a peer
+                    //
+                    // Local peer id from config is 1..4.
+                    // We assume ownerId is stored as 0..3 (ObjectOwnerType - 1).
+                    // --------------------------------------------------
+                    if (auto* owner = world.getComponent<OwnerComponent>(e))
                     {
-                        const bool isOwned = (owner->ownerId == (m_localPeerId - 1));
-                        phys.body.SetMotionType(isOwned ? BodyMotionType::Dynamic
-                            : BodyMotionType::Kinematic);
+                        if (owner->ownerId >= 0)
+                        {
+                            const bool isOwned = (owner->ownerId == (m_localPeerId - 1));
+                            phys.body.SetMotionType(isOwned ? BodyMotionType::Dynamic
+                                : BodyMotionType::Kinematic);
+                        }
                     }
                 }
 

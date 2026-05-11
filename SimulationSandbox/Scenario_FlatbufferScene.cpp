@@ -62,8 +62,8 @@ namespace
             using T = std::decay_t<decltype(s)>;
             if constexpr (std::is_same_v<T, SphereShape>)   return "sphere.obj";
             if constexpr (std::is_same_v<T, CuboidShape>)   return "cube.obj";
-            if constexpr (std::is_same_v<T, CylinderShape>) return "sphere.obj";
-            if constexpr (std::is_same_v<T, CapsuleShape>)  return "sphere.obj";
+            if constexpr (std::is_same_v<T, CylinderShape>) return "cylinder.obj";
+            if constexpr (std::is_same_v<T, CapsuleShape>)  return "capsule.obj";
             if constexpr (std::is_same_v<T, PlaneShape>)    return "Plane.obj";
             return "sphere.obj";
         }, shape);

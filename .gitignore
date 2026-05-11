@@ -41,7 +41,6 @@ project.fragment.lock.json
 *.log
 
 ## Generated files
-*.obj
 *.o
 *.pch
 *.pdb

@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include "NetworkingSystem.h"
 #include "NetAddress.h"
 
@@ -5,6 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+
 
 namespace Net
 {

@@ -6,9 +6,18 @@
 
 #include <vector>
 #include <atomic>
+#include <random>
 
 namespace Net
 {
+    struct SnapshotImpairmentSettings
+    {
+        bool enabled = false;
+        float latencyMs = 0.0f;
+        float jitterMs = 0.0f;
+        float dropPercent = 0.0f;
+    };
+
     class NetworkingSystem
     {
     public:
@@ -34,13 +43,32 @@ namespace Net
         // Returns true if one was available.
         bool PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick);
 
+        void SetSnapshotImpairment(const SnapshotImpairmentSettings& settings);
+
     private:
         void SendHello();
         void HandlePacket(const sockaddr_storage& from, const char* data, int size);
 
         void SendGlobalCommand(const GlobalCommandPayload& payload);
+        bool ShouldDropSnapshotPacket() const;
+        float SampleSnapshotDelaySeconds() const;
 
     private:
+        struct DelayedOutgoingSnapshot
+        {
+            sockaddr_storage addr{};
+            int addrLen = 0;
+            std::vector<char> payload;
+            float delaySec = 0.0f;
+        };
+
+        struct DelayedIncomingSnapshot
+        {
+            uint32_t tick = 0;
+            std::vector<StateSnapshotItem> items;
+            float delaySec = 0.0f;
+        };
+
         UdpSocket m_socket;
 
         int m_localPeerId = 0;
@@ -56,5 +84,11 @@ namespace Net
         std::atomic<bool> m_hasPendingSnapshot{ false };
         uint32_t m_pendingSnapshotTick = 0;
         std::vector<StateSnapshotItem> m_pendingSnapshotItems;
+
+        SnapshotImpairmentSettings m_snapshotImpairment{};
+        mutable std::mt19937 m_rng{ std::random_device{}() };
+        mutable std::uniform_real_distribution<float> m_unitDist{ 0.0f, 1.0f };
+        std::vector<DelayedOutgoingSnapshot> m_delayedOutgoingSnapshots;
+        std::vector<DelayedIncomingSnapshot> m_delayedIncomingSnapshots;
     };
 }

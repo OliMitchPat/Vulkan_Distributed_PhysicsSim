@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 namespace Net
 {
@@ -146,6 +147,20 @@ namespace Net
     // ============================================================
     void NetworkingSystem::Update(float dt)
     {
+        // ---- Deliver delayed outgoing snapshot packets ----
+        for (size_t i = 0; i < m_delayedOutgoingSnapshots.size();)
+        {
+            auto& p = m_delayedOutgoingSnapshots[i];
+            p.delaySec -= dt;
+            if (p.delaySec <= 0.0f)
+            {
+                m_socket.Send(p.addr, p.addrLen, p.payload.data(), (int)p.payload.size());
+                m_delayedOutgoingSnapshots.erase(m_delayedOutgoingSnapshots.begin() + (int)i);
+                continue;
+            }
+            ++i;
+        }
+
         sockaddr_storage from{};
 
         // ---- Receive loop ----
@@ -169,6 +184,22 @@ namespace Net
             }
 
             HandlePacket(from, m_recvBuffer, size);
+        }
+
+        // ---- Deliver delayed incoming snapshots to mailbox ----
+        for (size_t i = 0; i < m_delayedIncomingSnapshots.size();)
+        {
+            auto& p = m_delayedIncomingSnapshots[i];
+            p.delaySec -= dt;
+            if (p.delaySec <= 0.0f)
+            {
+                m_pendingSnapshotTick = p.tick;
+                m_pendingSnapshotItems = p.items;
+                m_hasPendingSnapshot.store(true, std::memory_order_release);
+                m_delayedIncomingSnapshots.erase(m_delayedIncomingSnapshots.begin() + (int)i);
+                continue;
+            }
+            ++i;
         }
 
         // ---- Resend logic (reliable queue) ----
@@ -306,6 +337,9 @@ namespace Net
 
         case MsgType::STATE_SNAPSHOT:
         {
+            if (ShouldDropSnapshotPacket())
+                break;
+
             if (size < (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader)))
                 break;
 
@@ -322,9 +356,21 @@ namespace Net
             const StateSnapshotItem* items =
                 reinterpret_cast<const StateSnapshotItem*>(data + sizeof(MsgHeader) + sizeof(StateSnapshotHeader));
 
-            m_pendingSnapshotTick = hdr->tick;
-            m_pendingSnapshotItems.assign(items, items + count);
-            m_hasPendingSnapshot.store(true, std::memory_order_release);
+            const float delaySec = SampleSnapshotDelaySeconds();
+            if (delaySec > 0.0f)
+            {
+                DelayedIncomingSnapshot delayed{};
+                delayed.tick = hdr->tick;
+                delayed.items.assign(items, items + count);
+                delayed.delaySec = delaySec;
+                m_delayedIncomingSnapshots.push_back(std::move(delayed));
+            }
+            else
+            {
+                m_pendingSnapshotTick = hdr->tick;
+                m_pendingSnapshotItems.assign(items, items + count);
+                m_hasPendingSnapshot.store(true, std::memory_order_release);
+            }
             break;
         }
 
@@ -412,7 +458,25 @@ namespace Net
         std::memcpy(buffer + sizeof(hdr) + sizeof(sh), items, count * sizeof(StateSnapshotItem));
 
         for (auto& peer : m_peers)
-            m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
+        {
+            if (ShouldDropSnapshotPacket())
+                continue;
+
+            const float delaySec = SampleSnapshotDelaySeconds();
+            if (delaySec > 0.0f)
+            {
+                DelayedOutgoingSnapshot delayed{};
+                delayed.addr = peer.addr;
+                delayed.addrLen = peer.addrLen;
+                delayed.payload.assign(buffer, buffer + bytes);
+                delayed.delaySec = delaySec;
+                m_delayedOutgoingSnapshots.push_back(std::move(delayed));
+            }
+            else
+            {
+                m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
+            }
+        }
     }
 
     bool NetworkingSystem::PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick)
@@ -423,6 +487,47 @@ namespace Net
         outTick = m_pendingSnapshotTick;
         outItems = m_pendingSnapshotItems;
         return true;
+    }
+
+    void NetworkingSystem::SetSnapshotImpairment(const SnapshotImpairmentSettings& settings)
+    {
+        m_snapshotImpairment.enabled = settings.enabled;
+        m_snapshotImpairment.latencyMs = std::max(0.0f, settings.latencyMs);
+        m_snapshotImpairment.jitterMs = std::max(0.0f, settings.jitterMs);
+        m_snapshotImpairment.dropPercent = std::max(0.0f, std::min(settings.dropPercent, 100.0f));
+    }
+
+    bool NetworkingSystem::ShouldDropSnapshotPacket() const
+    {
+        if (!m_snapshotImpairment.enabled)
+            return false;
+
+        const float drop = m_snapshotImpairment.dropPercent;
+        if (drop <= 0.0f)
+            return false;
+
+        return (m_unitDist(m_rng) * 100.0f) < drop;
+    }
+
+    float NetworkingSystem::SampleSnapshotDelaySeconds() const
+    {
+        if (!m_snapshotImpairment.enabled)
+            return 0.0f;
+
+        const float latencyMs = m_snapshotImpairment.latencyMs;
+        const float jitterMs = m_snapshotImpairment.jitterMs;
+        if (latencyMs <= 0.0f && jitterMs <= 0.0f)
+            return 0.0f;
+
+        float delayMs = latencyMs;
+        if (jitterMs > 0.0f)
+        {
+            const float jitter = (m_unitDist(m_rng) * 2.0f - 1.0f) * jitterMs;
+            delayMs += jitter;
+        }
+
+        delayMs = std::max(0.0f, delayMs);
+        return delayMs * 0.001f;
     }
 
 }

@@ -43,6 +43,8 @@
 #include <atomic>
 #include <memory>
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <mutex>
@@ -65,7 +67,131 @@ struct ReplicaState
     glm::vec3 linVel{ 0 };
     glm::vec3 angVel{ 0 };
     uint32_t tick = 0;
+    double recvTimeSec = 0.0;
 };
+
+static constexpr size_t kReplicaSnapshotRingCapacity = 64;
+
+struct ReplicaSnapshotRing
+{
+    std::array<ReplicaState, kReplicaSnapshotRingCapacity> samples{};
+    size_t head = 0;
+    size_t count = 0;
+
+    void Clear()
+    {
+        head = 0;
+        count = 0;
+    }
+
+    bool Empty() const { return count == 0; }
+
+    const ReplicaState& At(size_t idx) const
+    {
+        return samples[(head + idx) % kReplicaSnapshotRingCapacity];
+    }
+
+    const ReplicaState& Latest() const
+    {
+        return At(count - 1);
+    }
+
+    void Push(const ReplicaState& s)
+    {
+        if (count > 0)
+        {
+            const ReplicaState& latest = Latest();
+            if (s.tick <= latest.tick)
+                return;
+        }
+
+        const size_t insertIdx = (head + count) % kReplicaSnapshotRingCapacity;
+        samples[insertIdx] = s;
+
+        if (count < kReplicaSnapshotRingCapacity)
+        {
+            ++count;
+        }
+        else
+        {
+            head = (head + 1) % kReplicaSnapshotRingCapacity;
+        }
+    }
+};
+
+static double NowSeconds()
+{
+    using clock = std::chrono::steady_clock;
+    const auto now = clock::now().time_since_epoch();
+    return std::chrono::duration<double>(now).count();
+}
+
+static glm::quat IntegrateOrientation(const glm::quat& rot, const glm::vec3& angVel, float dt)
+{
+    const float speed = glm::length(angVel);
+    if (speed <= 1e-5f || dt <= 0.0f)
+        return rot;
+
+    const glm::vec3 axis = angVel / speed;
+    const float angle = speed * dt;
+    const glm::quat delta = glm::angleAxis(angle, axis);
+    return glm::normalize(delta * rot);
+}
+
+static bool SampleReplicaStateAtTime(const ReplicaSnapshotRing& ring,
+    double sampleTimeSec, float maxExtrapSec,
+    ReplicaState& outState, bool& outUsedExtrapolation)
+{
+    outUsedExtrapolation = false;
+    if (ring.Empty())
+        return false;
+
+    if (ring.count == 1)
+    {
+        outState = ring.Latest();
+        return true;
+    }
+
+    const ReplicaState& oldest = ring.At(0);
+    const ReplicaState& newest = ring.Latest();
+
+    if (sampleTimeSec <= oldest.recvTimeSec)
+    {
+        outState = oldest;
+        return true;
+    }
+
+    for (size_t i = 1; i < ring.count; ++i)
+    {
+        const ReplicaState& b = ring.At(i);
+        if (sampleTimeSec <= b.recvTimeSec)
+        {
+            const ReplicaState& a = ring.At(i - 1);
+            const double span = std::max(1e-5, b.recvTimeSec - a.recvTimeSec);
+            const float t = (float)((sampleTimeSec - a.recvTimeSec) / span);
+            const float clampedT = glm::clamp(t, 0.0f, 1.0f);
+
+            outState = a;
+            outState.pos = glm::mix(a.pos, b.pos, clampedT);
+            outState.rot = glm::normalize(glm::slerp(a.rot, b.rot, clampedT));
+            outState.linVel = glm::mix(a.linVel, b.linVel, clampedT);
+            outState.angVel = glm::mix(a.angVel, b.angVel, clampedT);
+            outState.tick = (clampedT < 0.5f) ? a.tick : b.tick;
+            outState.recvTimeSec = sampleTimeSec;
+            return true;
+        }
+    }
+
+    outUsedExtrapolation = true;
+    outState = newest;
+
+    const double dtSec = std::max(0.0, sampleTimeSec - newest.recvTimeSec);
+    const float clampedExtrap = std::min((float)dtSec, maxExtrapSec);
+    outState.pos = newest.pos + newest.linVel * clampedExtrap;
+    outState.rot = IntegrateOrientation(newest.rot, newest.angVel, clampedExtrap);
+    outState.recvTimeSec = newest.recvTimeSec + clampedExtrap;
+    return true;
+}
 
 // ============================================================================
 // Shared control state between threads
@@ -133,7 +259,19 @@ struct SimSharedState
 
     // ---- Milestone 5: incoming replica snapshots (net -> sim) ----
     std::mutex inSnapMutex;
-    std::unordered_map<uint32_t, ReplicaState> inReplicaLatest; // objectId -> latest
+    std::unordered_map<uint32_t, ReplicaSnapshotRing> inReplicaHistory; // objectId -> received snapshot ring
+
+    // Replica smoothing controls
+    std::atomic<bool>  replicaSmoothingEnabled{ true };
+    std::atomic<float> replicaInterpDelayMs{ 140.0f };
+    std::atomic<float> replicaMaxExtrapolationMs{ 100.0f };
+    std::atomic<float> replicaCorrectionThreshold{ 0.75f };
+
+    // Local network impairment tools (affects STATE_SNAPSHOT packets only)
+    std::atomic<bool>  netImpairmentEnabled{ false };
+    std::atomic<float> netLatencyMs{ 0.0f };
+    std::atomic<float> netJitterMs{ 0.0f };
+    std::atomic<float> netDropPercent{ 0.0f };
 
     // Snapshot buffer (sim -> render)
     SnapshotBuffer snapshotBuf;
@@ -482,7 +620,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     // don't bleed into the newly loaded scene.
                     {
                         std::lock_guard<std::mutex> lk(shared.inSnapMutex);
-                        shared.inReplicaLatest.clear();
+                        shared.inReplicaHistory.clear();
                     }
                     {
                         std::lock_guard<std::mutex> lk(shared.outSnapMutex);
@@ -499,18 +637,26 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             }
         }
 
-        // ----- Milestone 5: apply incoming replica snapshots (net -> sim) -----
+        // ----- Milestone 5+: apply incoming replica snapshots (net -> sim) -----
         {
-            std::unordered_map<uint32_t, ReplicaState> latest;
+            std::unordered_map<uint32_t, ReplicaSnapshotRing> history;
             {
                 std::lock_guard<std::mutex> lk(shared.inSnapMutex);
-                latest = shared.inReplicaLatest; // copy to minimize lock time
+                history = shared.inReplicaHistory; // copy to minimize lock time
             }
 
-            for (auto& kv : latest)
+            const bool smoothingEnabled = shared.replicaSmoothingEnabled.load(std::memory_order_relaxed);
+            const float interpDelayMs = shared.replicaInterpDelayMs.load(std::memory_order_relaxed);
+            const float maxExtrapMs = shared.replicaMaxExtrapolationMs.load(std::memory_order_relaxed);
+            const float correctionThreshold = shared.replicaCorrectionThreshold.load(std::memory_order_relaxed);
+            const float smoothingDt = std::max(0.0f, dt);
+            const double sampleTimeSec = NowSeconds() - std::max(0.0f, interpDelayMs) * 0.001;
+            const float maxExtrapSec = std::max(0.0f, maxExtrapMs) * 0.001f;
+
+            for (auto& kv : history)
             {
                 const uint32_t id = kv.first;
-                const ReplicaState& st = kv.second;
+                const ReplicaSnapshotRing& ring = kv.second;
 
                 Entity e = (Entity)id;
 
@@ -521,13 +667,48 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 // Don't override authoritative bodies
                 if (phys->body.IsDynamic()) continue;
 
-                phys->body.SetPosition(st.pos);
-                phys->body.SetOrientation(st.rot);
-                phys->body.SetLinearVelocity(st.linVel);
-                phys->body.SetAngularVelocity(st.angVel);
+                ReplicaState target{};
+                bool usedExtrapolation = false;
+                if (!SampleReplicaStateAtTime(ring, sampleTimeSec, maxExtrapSec, target, usedExtrapolation))
+                    continue;
 
-                tr->position = st.pos;
-                tr->rotation = glm::eulerAngles(st.rot);
+                if (!smoothingEnabled)
+                {
+                    phys->body.SetPosition(target.pos);
+                    phys->body.SetOrientation(target.rot);
+                    phys->body.SetLinearVelocity(target.linVel);
+                    phys->body.SetAngularVelocity(target.angVel);
+                    tr->position = target.pos;
+                    tr->rotation = glm::eulerAngles(target.rot);
+                    continue;
+                }
+
+                const glm::vec3 currentPos = phys->body.Position();
+                const glm::quat currentRot = phys->body.Orientation();
+                const glm::vec3 currentLinVel = phys->body.LinearVelocity();
+                const glm::vec3 currentAngVel = phys->body.AngularVelocity();
+
+                const float posError = glm::length(target.pos - currentPos);
+                const bool largeError = posError > correctionThreshold;
+
+                float spring = largeError ? 7.0f : 16.0f;
+                if (usedExtrapolation)
+                    spring *= 0.75f;
+
+                const float blend = glm::clamp(spring * smoothingDt, 0.0f, 1.0f);
+
+                const glm::vec3 smoothPos = glm::mix(currentPos, target.pos, blend);
+                const glm::quat smoothRot = glm::normalize(glm::slerp(currentRot, target.rot, blend));
+                const glm::vec3 smoothLinVel = glm::mix(currentLinVel, target.linVel, blend);
+                const glm::vec3 smoothAngVel = glm::mix(currentAngVel, target.angVel, blend);
+
+                phys->body.SetPosition(smoothPos);
+                phys->body.SetOrientation(smoothRot);
+                phys->body.SetLinearVelocity(smoothLinVel);
+                phys->body.SetAngularVelocity(smoothAngVel);
+
+                tr->position = smoothPos;
+                tr->rotation = glm::eulerAngles(smoothRot);
             }
         }
 
@@ -636,6 +817,13 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
         float dt = lc.beginFrame();
         shared.measuredNetworkHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
 
+        Net::SnapshotImpairmentSettings impair{};
+        impair.enabled = shared.netImpairmentEnabled.load(std::memory_order_relaxed);
+        impair.latencyMs = shared.netLatencyMs.load(std::memory_order_relaxed);
+        impair.jitterMs = shared.netJitterMs.load(std::memory_order_relaxed);
+        impair.dropPercent = shared.netDropPercent.load(std::memory_order_relaxed);
+        net.SetSnapshotImpairment(impair);
+
         net.Update(dt);
 
         // ---- Send outgoing global commands (from render thread) ----
@@ -710,6 +898,7 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             while (net.PopReceivedStateSnapshot(items, tick))
             {
                 std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                const double nowSec = NowSeconds();
 
                 for (const auto& it : items)
                 {
@@ -720,8 +909,10 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
                     st.linVel = glm::vec3(it.linVel.x, it.linVel.y, it.linVel.z);
                     st.angVel = glm::vec3(it.angVel.x, it.angVel.y, it.angVel.z);
                     st.tick = tick;
+                    st.recvTimeSec = nowSec;
 
-                    shared.inReplicaLatest[it.objectId] = st;
+                    auto& ring = shared.inReplicaHistory[it.objectId];
+                    ring.Push(st);
                 }
             }
         }
@@ -1020,6 +1211,62 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 ImGui::Text("Render  : %6.1f Hz", displayRenderHz);
                 ImGui::Text("Network : %6.1f Hz", displayNetHz);
                 ImGui::Text("Sim     : %6.1f Hz", displaySimHz);
+                ImGui::Separator();
+
+                ImGui::SeparatorText("Replica Smoothing");
+                {
+                    bool smoothOn = shared.replicaSmoothingEnabled.load(std::memory_order_relaxed);
+                    if (ImGui::Checkbox("Enable Smoothing", &smoothOn))
+                        shared.replicaSmoothingEnabled.store(smoothOn, std::memory_order_relaxed);
+
+                    float interpDelayMs = shared.replicaInterpDelayMs.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Interpolation Delay (ms)", &interpDelayMs, 60.0f, 250.0f, "%.0f"))
+                        shared.replicaInterpDelayMs.store(interpDelayMs, std::memory_order_relaxed);
+
+                    float extrapMs = shared.replicaMaxExtrapolationMs.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Max Extrapolation (ms)", &extrapMs, 0.0f, 200.0f, "%.0f"))
+                        shared.replicaMaxExtrapolationMs.store(extrapMs, std::memory_order_relaxed);
+
+                    float correctionThreshold = shared.replicaCorrectionThreshold.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Large Error Threshold (m)", &correctionThreshold, 0.1f, 3.0f, "%.2f"))
+                        shared.replicaCorrectionThreshold.store(correctionThreshold, std::memory_order_relaxed);
+                }
+                ImGui::Separator();
+
+                ImGui::SeparatorText("Network Impairment (Local)");
+                {
+                    bool impairOn = shared.netImpairmentEnabled.load(std::memory_order_relaxed);
+                    if (ImGui::Checkbox("Enable Snapshot Impairment", &impairOn))
+                        shared.netImpairmentEnabled.store(impairOn, std::memory_order_relaxed);
+
+                    float latencyMs = shared.netLatencyMs.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Latency (ms)", &latencyMs, 0.0f, 300.0f, "%.0f"))
+                        shared.netLatencyMs.store(latencyMs, std::memory_order_relaxed);
+
+                    float jitterMs = shared.netJitterMs.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Latency Jitter (ms)", &jitterMs, 0.0f, 150.0f, "%.0f"))
+                        shared.netJitterMs.store(jitterMs, std::memory_order_relaxed);
+
+                    float dropPct = shared.netDropPercent.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Packet Drop (%)", &dropPct, 0.0f, 80.0f, "%.0f"))
+                        shared.netDropPercent.store(dropPct, std::memory_order_relaxed);
+
+                    if (ImGui::Button("Preset: Stable Network"))
+                    {
+                        shared.netImpairmentEnabled.store(false, std::memory_order_relaxed);
+                        shared.netLatencyMs.store(0.0f, std::memory_order_relaxed);
+                        shared.netJitterMs.store(0.0f, std::memory_order_relaxed);
+                        shared.netDropPercent.store(0.0f, std::memory_order_relaxed);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Preset: 100ms +/-50ms, 20% drop"))
+                    {
+                        shared.netImpairmentEnabled.store(true, std::memory_order_relaxed);
+                        shared.netLatencyMs.store(100.0f, std::memory_order_relaxed);
+                        shared.netJitterMs.store(50.0f, std::memory_order_relaxed);
+                        shared.netDropPercent.store(20.0f, std::memory_order_relaxed);
+                    }
+                }
                 ImGui::Separator();
 
                 ImGui::SeparatorText("Thread / Core Mapping");

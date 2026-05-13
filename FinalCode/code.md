@@ -36,3 +36,39 @@ The smoothing pipeline is:
 5. Observe remote/non-authoritative objects:
    - motion should remain smooth and visually stable under loss/latency
    - missing snapshots should no longer cause immediate harsh snapping
+
+## Distributed spawners (Milestone 7)
+
+Spawner execution and distributed creation are now handled as follows:
+
+1. **Spawner owner simulation**
+   - Only the controlling peer simulates each spawner timer.
+   - Controller peer is deterministic:
+     - `ONE/TWO/THREE/FOUR` => that peer controls the spawner.
+     - `SEQUENTIAL` => peer `ONE` controls the spawner.
+
+2. **Reliable spawn replication**
+   - Spawns are sent with reliable `SPAWN_OBJECT` messages.
+   - Payload includes deterministic `ObjectId`, shape parameters, material, initial linear/angular velocity, transform, and owner.
+   - Receiving peers instantiate the same object from the payload.
+
+3. **Sequential ownership**
+   - For `SEQUENTIAL` spawners, ownership rotates deterministically:
+     - `ONE -> TWO -> THREE -> FOUR -> ONE ...`
+   - Rotation is driven by the spawner owner's spawn counter.
+
+### Integration notes
+
+- The scene loader still creates authored objects first (deterministic IDs from scene order).
+- Spawned objects are then created in deterministic event order and use the event `ObjectId`.
+- Physics ownership mapping remains unchanged:
+  - owner-local objects are dynamic and simulated locally
+  - non-owned objects are kinematic replicas updated from network state
+
+### Manual test steps
+
+1. Start at least two peers with the same scene containing spawners (`sphereSpawners.bin`).
+2. Confirm spawned objects appear on every peer.
+3. Enable **View -> Colour by Owner** to verify rotating ownership colours over successive spawns.
+4. Observe that owned objects move under their initial velocities and simulation.
+5. Leave peers running for repeated spawns and verify the sequential ownership cycle continues correctly.

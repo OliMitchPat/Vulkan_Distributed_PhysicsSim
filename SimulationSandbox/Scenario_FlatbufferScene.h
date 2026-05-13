@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Scenario.h"
+#include "NetProtocol.h"
 #include <memory>
 #include <string>
+#include <vector>
 
 // Forward declarations
 namespace SimIO { class SceneLoader; }
@@ -26,11 +28,28 @@ public:
 
     void OnLoad  (World& world) override;
     void OnUnload(World& world) override;
+    void Update(World& world, float dt) override;
+
+    void SetLocalPeerId(int peerId);
+    bool PopPendingSpawn(Net::SpawnObjectPayload& outPayload);
+    bool SpawnFromNetworkEvent(World& world, const Net::SpawnObjectPayload& payload);
 
 private:
+    struct SpawnerRuntime
+    {
+        uint32_t emittedCount = 0;
+        uint32_t spawnCounter = 0;
+        float nextSpawnTimeSec = 0.0f;
+        bool burstDone = false;
+    };
+
     std::string m_path;
     std::string m_displayName;   // set after first successful load
     bool        m_gravityOn = true;
+    int         m_localPeerId = 1; // 1..4
+    float       m_spawnerElapsedSec = 0.0f;
+    std::vector<SpawnerRuntime> m_spawnerRuntime;
+    std::vector<Net::SpawnObjectPayload> m_pendingSpawnEvents;
 
     std::unique_ptr<SimIO::SceneLoader> m_loader;
 };

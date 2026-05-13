@@ -376,6 +376,27 @@ namespace Net
             break;
         }
 
+        case MsgType::SPAWN_OBJECT:
+        {
+            // Reliable channel
+            SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
+
+            // Duplicate suppression
+            if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)
+                break;
+
+            peer->lastReceivedSeq = hdr->seq;
+
+            if (size < (int)sizeof(MsgHeader) + (int)sizeof(SpawnObjectPayload))
+                break;
+
+            const SpawnObjectPayload* payload =
+                reinterpret_cast<const SpawnObjectPayload*>(data + sizeof(MsgHeader));
+
+            m_pendingSpawnObjects.push_back(*payload);
+            break;
+        }
+
         default:
             break;
         }
@@ -424,6 +445,33 @@ namespace Net
 
             SendReliable(m_socket, peer, buffer, (int)(sizeof(hdr) + sizeof(payload)));
         }
+    }
+
+    void NetworkingSystem::SendSpawnObject(const SpawnObjectPayload& payload)
+    {
+        for (auto& peer : m_peers)
+        {
+            MsgHeader hdr{};
+            hdr.msgType = (uint8_t)MsgType::SPAWN_OBJECT;
+            hdr.peerId = (uint8_t)m_localPeerId;
+            hdr.seq = peer.nextSeq++;
+
+            char buffer[256];
+            std::memcpy(buffer, &hdr, sizeof(hdr));
+            std::memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
+
+            SendReliable(m_socket, peer, buffer, (int)(sizeof(hdr) + sizeof(payload)));
+        }
+    }
+
+    bool NetworkingSystem::PopReceivedSpawnObject(SpawnObjectPayload& out)
+    {
+        if (m_pendingSpawnObjects.empty())
+            return false;
+
+        out = m_pendingSpawnObjects.front();
+        m_pendingSpawnObjects.pop_front();
+        return true;
     }
 
     // ============================================================

@@ -261,6 +261,8 @@ namespace
 
     static int ResolveSpawnedOwnerId(const Simulation::SpawnerOwnerType ownerType, uint32_t spawnCounter)
     {
+        // Returns ECS/network owner slot in 0..3.
+        // Peer ids in config are 1..4 and are compared as (peerId - 1).
         if (ownerType == Simulation::SpawnerOwnerType_SEQUENTIAL)
             return static_cast<int>(spawnCounter % 4u); // ONE->TWO->THREE->FOUR
 
@@ -793,7 +795,6 @@ void Scenario_FlatbufferScene::Update(World& world, float dt)
             payload.sizeZ = sampledSize.z;
 
             const std::string material = SimIO::ToStdStringOrEmpty(base->material());
-            std::memset(payload.material, 0, sizeof(payload.material));
             if (!material.empty())
             {
                 std::strncpy(payload.material, material.c_str(), sizeof(payload.material) - 1);

@@ -5,6 +5,7 @@
 #include "PeerConfig.h"
 
 #include <vector>
+#include <deque>
 #include <atomic>
 #include <random>
 
@@ -42,6 +43,12 @@ namespace Net
         // Pops the latest received snapshot (single-slot mailbox).
         // Returns true if one was available.
         bool PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick);
+
+        // ------------------------------------------------------------
+        // Spawn events (reliable)
+        // ------------------------------------------------------------
+        void SendSpawnObject(const SpawnObjectPayload& payload);
+        bool PopReceivedSpawnObject(SpawnObjectPayload& out);
 
         void SetSnapshotImpairment(const SnapshotImpairmentSettings& settings);
 
@@ -84,6 +91,8 @@ namespace Net
         std::atomic<bool> m_hasPendingSnapshot{ false };
         uint32_t m_pendingSnapshotTick = 0;
         std::vector<StateSnapshotItem> m_pendingSnapshotItems;
+
+        std::deque<SpawnObjectPayload> m_pendingSpawnObjects;
 
         SnapshotImpairmentSettings m_snapshotImpairment{};
         mutable std::mt19937 m_rng{ std::random_device{}() };

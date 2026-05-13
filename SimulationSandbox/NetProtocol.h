@@ -11,7 +11,8 @@ namespace Net
         WELCOME,
         GLOBAL_COMMAND,
         STATE_SNAPSHOT,
-        ACK
+        ACK,
+        SPAWN_OBJECT
     };
 
 #pragma pack(push, 1)
@@ -60,6 +61,39 @@ namespace Net
         NetQuat  rot;
         NetVec3  linVel;
         NetVec3  angVel;
+    };
+
+    enum class SpawnShapeType : uint8_t
+    {
+        Sphere = 1,
+        Cylinder = 2,
+        Capsule = 3,
+        Cuboid = 4
+    };
+
+    struct SpawnObjectPayload
+    {
+        uint32_t objectId = 0;
+        uint8_t ownerId = 0;      // 0..3 maps to ONE..FOUR
+        uint8_t shapeType = 0;    // SpawnShapeType
+        uint16_t reserved = 0;
+
+        NetVec3 pos;
+        NetQuat rot;
+        NetVec3 linVel;
+        NetVec3 angVel;
+
+        // shape parameters:
+        // Sphere:  radius
+        // Cylinder/Capsule: radius + height
+        // Cuboid: sizeX,sizeY,sizeZ
+        float radius = 0.5f;
+        float height = 1.0f;
+        float sizeX = 1.0f;
+        float sizeY = 1.0f;
+        float sizeZ = 1.0f;
+
+        char material[32]{};
     };
 #pragma pack(pop)
 }

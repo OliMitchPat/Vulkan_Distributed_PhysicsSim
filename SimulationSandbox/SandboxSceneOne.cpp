@@ -261,6 +261,13 @@ struct SimSharedState
     std::mutex inSnapMutex;
     std::unordered_map<uint32_t, ReplicaSnapshotRing> inReplicaHistory; // objectId -> received snapshot ring
 
+    // ---- Milestone 7: distributed spawns (sim <-> net) ----
+    std::mutex outSpawnMutex;
+    std::vector<Net::SpawnObjectPayload> outSpawnEvents;
+
+    std::mutex inSpawnMutex;
+    std::vector<Net::SpawnObjectPayload> inSpawnEvents;
+
     // Replica smoothing controls
     std::atomic<bool>  replicaSmoothingEnabled{ true };
     std::atomic<float> replicaInterpDelayMs{ 140.0f };
@@ -628,6 +635,14 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                         shared.outTick = 0;
                         shared.outDirty = false;
                     }
+                    {
+                        std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                        shared.inSpawnEvents.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                        shared.outSpawnEvents.clear();
+                    }
                 }
 
                 shared.requestedSceneIndex.compare_exchange_strong(
@@ -714,6 +729,20 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
         if (Scenario* s = scenarios.Current())
         {
+            if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
+            {
+                std::vector<Net::SpawnObjectPayload> incomingSpawns;
+                {
+                    std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                    incomingSpawns.swap(shared.inSpawnEvents);
+                }
+
+                for (const auto& payload : incomingSpawns)
+                {
+                    fb->SpawnFromNetworkEvent(world, payload);
+                }
+            }
+
             if (useFixed)
             {
                 if (running)
@@ -739,6 +768,22 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     physicsSystem.Update(world, stepDt);
                     collisionSystem.Update(world);
                     ++tickNumber;
+                }
+            }
+
+            if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
+            {
+                Net::SpawnObjectPayload spawnPayload{};
+                std::vector<Net::SpawnObjectPayload> generated;
+                while (fb->PopPendingSpawn(spawnPayload))
+                {
+                    generated.push_back(spawnPayload);
+                }
+
+                if (!generated.empty())
+                {
+                    std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                    shared.outSpawnEvents.insert(shared.outSpawnEvents.end(), generated.begin(), generated.end());
                 }
             }
         }
@@ -839,6 +884,19 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             net.SendGravityEnabled(enabled);
         }
 
+        // ---- Milestone 7: send SPAWN_OBJECT (reliable) ----
+        {
+            std::vector<SpawnObjectPayload> pending;
+            {
+                std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                if (!shared.outSpawnEvents.empty())
+                    pending.swap(shared.outSpawnEvents);
+            }
+
+            for (const auto& spawn : pending)
+                net.SendSpawnObject(spawn);
+        }
+
         // ---- Receive incoming global commands and forward to sim thread ----
         GlobalCommandPayload cmd{};
         while (net.PopReceivedGlobalCommand(cmd))
@@ -917,6 +975,22 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             }
         }
 
+        // ---- Milestone 7: receive SPAWN_OBJECT and forward to sim thread ----
+        {
+            SpawnObjectPayload payload{};
+            std::vector<SpawnObjectPayload> received;
+            while (net.PopReceivedSpawnObject(payload))
+            {
+                received.push_back(payload);
+            }
+
+            if (!received.empty())
+            {
+                std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                shared.inSpawnEvents.insert(shared.inSpawnEvents.end(), received.begin(), received.end());
+            }
+        }
+
         lc.endFrame();
     }
 
@@ -941,6 +1015,12 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/piston.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/sphereSpawners.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/tumbler.bin"));
+
+    for (int i = 0; i < scenarios.Count(); ++i)
+    {
+        if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(scenarios.Get(i)))
+            fb->SetLocalPeerId(cfg.peer_id);
+    }
 
     if (scenarios.Count() > 0)
         scenarios.SwitchTo(world, 0);

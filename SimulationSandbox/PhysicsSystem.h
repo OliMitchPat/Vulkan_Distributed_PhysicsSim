@@ -95,6 +95,13 @@ public:
                     phys.body.SetAngularDamping(0.0f);
                 }
 
+                // Optional initial velocity (used by spawned objects)
+                if (auto* vel = world.getComponent<VelocityComponent>(e))
+                {
+                    phys.body.SetLinearVelocity(vel->linearVelocity);
+                    phys.body.SetAngularVelocity(vel->angularVelocity);
+                }
+
                 phys.initialized = true;
             });
 

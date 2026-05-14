@@ -61,12 +61,14 @@ static void GetOBBCorners(const WorldOBB& b, glm::vec3 out[8])
                 out[i++] = b.center + float(sx) * ex + float(sy) * ey + float(sz) * ez;
 }
 
-// Sphere inside OBB (exact containment)
+
+// Sphere inside OBB/cuboid container
 static CollisionManifold ContainSphereInOBB(const WorldSphere& a, const WorldOBB& c)
 {
     CollisionManifold m{};
 
     const glm::vec3 d = a.center - c.center;
+
     const float x = glm::dot(d, c.axisX);
     const float y = glm::dot(d, c.axisY);
     const float z = glm::dot(d, c.axisZ);
@@ -78,28 +80,71 @@ static CollisionManifold ContainSphereInOBB(const WorldSphere& a, const WorldOBB
     if (mx >= a.radius && my >= a.radius && mz >= a.radius)
         return m; // fully inside
 
-    // most violated face = smallest margin
-    float minMargin = mx;
-    glm::vec3 n = (x >= 0.0f) ? -c.axisX : c.axisX;
-
-    if (my < minMargin) { minMargin = my; n = (y >= 0.0f) ? -c.axisY : c.axisY; }
-    if (mz < minMargin) { minMargin = mz; n = (z >= 0.0f) ? -c.axisZ : c.axisZ; }
-
     m.hit = true;
-    m.normal = n;
-    m.penetration = a.radius - minMargin;
 
-    // contact point on the violated face plane (best-effort)
-    if (n == c.axisX || n == -c.axisX)
-        m.contactPoint = c.center + ((x >= 0.0f) ? c.axisX : -c.axisX) * c.halfExtents.x;
-    else if (n == c.axisY || n == -c.axisY)
-        m.contactPoint = c.center + ((y >= 0.0f) ? c.axisY : -c.axisY) * c.halfExtents.y;
+    // Choose the most violated / closest face.
+    // Containment functions return inward correction direction.
+    if (mx <= my && mx <= mz)
+    {
+        const float sign = (x >= 0.0f) ? 1.0f : -1.0f;
+
+        // If sphere is near +X wall, push inward along -X.
+        // If sphere is near -X wall, push inward along +X.
+        m.normal = (sign > 0.0f) ? -c.axisX : c.axisX;
+        m.penetration = a.radius - mx;
+
+        // Contact point is on the actual violated face directly beside the sphere,
+        // not at the centre of the face.
+        const float cy = Clamp(y, -c.halfExtents.y, c.halfExtents.y);
+        const float cz = Clamp(z, -c.halfExtents.z, c.halfExtents.z);
+
+        m.contactPoint =
+            c.center +
+            c.axisX * (sign * c.halfExtents.x) +
+            c.axisY * cy +
+            c.axisZ * cz;
+    }
+    else if (my <= mx && my <= mz)
+    {
+        const float sign = (y >= 0.0f) ? 1.0f : -1.0f;
+
+        // If sphere is near +Y wall, push inward along -Y.
+        // If sphere is near -Y wall, push inward along +Y.
+        m.normal = (sign > 0.0f) ? -c.axisY : c.axisY;
+        m.penetration = a.radius - my;
+
+        const float cx = Clamp(x, -c.halfExtents.x, c.halfExtents.x);
+        const float cz = Clamp(z, -c.halfExtents.z, c.halfExtents.z);
+
+        m.contactPoint =
+            c.center +
+            c.axisX * cx +
+            c.axisY * (sign * c.halfExtents.y) +
+            c.axisZ * cz;
+    }
     else
-        m.contactPoint = c.center + ((z >= 0.0f) ? c.axisZ : -c.axisZ) * c.halfExtents.z;
+    {
+        const float sign = (z >= 0.0f) ? 1.0f : -1.0f;
+
+        // If sphere is near +Z wall, push inward along -Z.
+        // If sphere is near -Z wall, push inward along +Z.
+        m.normal = (sign > 0.0f) ? -c.axisZ : c.axisZ;
+        m.penetration = a.radius - mz;
+
+        const float cx = Clamp(x, -c.halfExtents.x, c.halfExtents.x);
+        const float cy = Clamp(y, -c.halfExtents.y, c.halfExtents.y);
+
+        m.contactPoint =
+            c.center +
+            c.axisX * cx +
+            c.axisY * cy +
+            c.axisZ * (sign * c.halfExtents.z);
+    }
 
     return m;
 }
 
+// Sphere inside Cylinder (exact containment)
 // Sphere inside Cylinder (exact containment)
 static CollisionManifold ContainSphereInCylinder(const WorldSphere& a, const WorldCylinder& c)
 {
@@ -107,53 +152,80 @@ static CollisionManifold ContainSphereInCylinder(const WorldSphere& a, const Wor
 
     const glm::vec3 ab = c.b - c.a;
     const float abLenSq = glm::dot(ab, ab);
+
     if (abLenSq <= kEps)
         return m;
 
     const float height = std::sqrt(abLenSq);
     const glm::vec3 axis = ab / height;
 
+    // Position of the sphere centre along the cylinder axis.
+    // t = 0 means level with cap A.
+    // t = height means level with cap B.
     const float t = glm::dot(a.center - c.a, axis);
-    const float tClamped = Clamp(t, 0.0f, height);
-    const glm::vec3 closestAxis = c.a + axis * tClamped;
 
-    const glm::vec3 radial = a.center - closestAxis;
+    // Projection of the sphere centre onto the cylinder axis.
+    // This is NOT clamped, because for cap contacts we still want
+    // the radial component relative to the cap plane.
+    const glm::vec3 axisPoint = c.a + axis * t;
+
+    // Radial vector from the cylinder axis to the sphere centre.
+    const glm::vec3 radial = a.center - axisPoint;
     const float rLen = std::sqrt(std::max(glm::dot(radial, radial), kEps));
 
-    // Must satisfy: rLen <= (R - a.radius)
+    // Must satisfy:
+    // rLen <= c.radius - a.radius
     const float sideMargin = (c.radius - a.radius) - rLen;
 
-    // Must satisfy: a.radius <= t <= height - a.radius
-    const float capMargin = std::min(t, height - t) - a.radius;
+    // Must satisfy:
+    // a.radius <= t <= height - a.radius
+    const float bottomMargin = t - a.radius;
+    const float topMargin = (height - t) - a.radius;
+    const float capMargin = std::min(bottomMargin, topMargin);
 
     if (sideMargin >= 0.0f && capMargin >= 0.0f)
         return m; // fully inside
 
     m.hit = true;
 
-    // choose most violated
+    // Choose the most violated constraint.
     if (sideMargin < capMargin)
     {
-        // side wall violation
-        const glm::vec3 outward = radial / rLen; // from axis to center
-        m.normal = -outward; // push inward
+        // Side wall violation.
+        const glm::vec3 outward = radial / rLen;
+
+        // Containment functions return inward correction direction.
+        m.normal = -outward;
         m.penetration = -sideMargin;
-        m.contactPoint = closestAxis + outward * c.radius;
+
+        // Actual point on the cylinder side wall nearest the sphere.
+        m.contactPoint = axisPoint + outward * c.radius;
     }
     else
     {
-        // cap violation (t below a.radius or above height-a.radius)
-        if (t < height * 0.5f)
+        if (bottomMargin < topMargin)
         {
-            m.normal = axis; // push toward +axis
-            m.penetration = -capMargin;
-            m.contactPoint = c.a;
+            // Bottom cap violation.
+            //
+            // Inward correction is toward +axis.
+            m.normal = axis;
+            m.penetration = -bottomMargin;
+
+            // Contact point should be below the sphere on the bottom cap plane,
+            // not the centre of the cap.
+            m.contactPoint = a.center - axis * t;
         }
         else
         {
+            // Top cap violation.
+            //
+            // Inward correction is toward -axis.
             m.normal = -axis;
-            m.penetration = -capMargin;
-            m.contactPoint = c.b;
+            m.penetration = -topMargin;
+
+            // Contact point should be above the sphere on the top cap plane,
+            // not the centre of the cap.
+            m.contactPoint = a.center + axis * (height - t);
         }
     }
 
@@ -485,4 +557,95 @@ CollisionManifold Contain(const WorldOBB& a, const WorldCylinder& c)
     m.penetration = worstPen;
     m.contactPoint = a.center;
     return m;
+}
+
+// ------------------------ Capsule container ------------------------
+
+static CollisionManifold ContainSphereInCapsule(
+    const WorldSphere& a,
+    const WorldCapsule& c)
+{
+    CollisionManifold m{};
+
+    const glm::vec3 closest = ClosestPointOnSegment(a.center, c.a, c.b);
+    const glm::vec3 delta = a.center - closest;
+    const float dist = Length(delta);
+
+    const float allowed = c.radius - a.radius;
+
+    if (dist <= allowed)
+        return m;
+
+    const glm::vec3 outward = SafeUnit(delta);
+
+    m.hit = true;
+    m.normal = -outward;              // inward correction direction
+    m.penetration = dist - allowed;
+    m.contactPoint = closest + outward * c.radius;
+
+    return m;
+}
+
+CollisionManifold Contain(const WorldSphere& a, const WorldCapsule& c)
+{
+    return ContainSphereInCapsule(a, c);
+}
+
+CollisionManifold Contain(const WorldCapsule& a, const WorldCapsule& c)
+{
+    CollisionManifold mA = ContainSphereInCapsule(WorldSphere{ a.a, a.radius }, c);
+    CollisionManifold mB = ContainSphereInCapsule(WorldSphere{ a.b, a.radius }, c);
+
+    if (!mA.hit && !mB.hit)
+        return {};
+
+    if (mA.hit && (!mB.hit || mA.penetration >= mB.penetration))
+        return mA;
+
+    return mB;
+}
+
+CollisionManifold Contain(const WorldCylinder& a, const WorldCapsule& c)
+{
+    CollisionManifold mA = ContainSphereInCapsule(WorldSphere{ a.a, a.radius }, c);
+    CollisionManifold mB = ContainSphereInCapsule(WorldSphere{ a.b, a.radius }, c);
+
+    if (!mA.hit && !mB.hit)
+        return {};
+
+    if (mA.hit && (!mB.hit || mA.penetration >= mB.penetration))
+        return mA;
+
+    return mB;
+}
+
+CollisionManifold Contain(const WorldOBB& a, const WorldCapsule& c)
+{
+    CollisionManifold result{};
+
+    glm::vec3 corners[8];
+    GetOBBCorners(a, corners);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const glm::vec3 closest = ClosestPointOnSegment(corners[i], c.a, c.b);
+        const glm::vec3 delta = corners[i] - closest;
+        const float dist = Length(delta);
+
+        if (dist <= c.radius)
+            continue;
+
+        const glm::vec3 outward = SafeUnit(delta);
+        const float penetration = dist - c.radius;
+
+        if (!result.hit || penetration > result.penetration)
+        {
+            result.hit = true;
+            result.normal = -outward;          // inward correction direction
+            result.penetration = penetration;
+            result.contactPoint = closest + outward * c.radius;
+        }
+    }
+
+    return result;
 }

@@ -52,32 +52,41 @@ public:
                         }, shape->shape);
                 }
 
-                // Containers should always be immovable colliders:
-                // - not affected by gravity
-                // - not integrated
-                // - not driven by network ownership mapping
-                if (isContainer)
+                if (phys.behaviour == BodyMotionType::Static)
+                {
+                    phys.body.SetMotionType(BodyMotionType::Static);
+                }
+                else if (isContainer)
                 {
                     phys.body.SetMotionType(BodyMotionType::Static);
                 }
                 else if (world.getComponent<AnimatedPathComponent>(e))
                 {
-                    // Animated objects are externally driven by Scenario_FlatbufferScene::Update.
-                    // They must collide as moving kinematic bodies, but physics impulses must not
-                    // alter their path or velocity.
                     phys.body.SetMotionType(BodyMotionType::Kinematic);
+                }
+                else if (auto* owner = world.getComponent<OwnerComponent>(e))
+                {
+                    if (owner->ownerId >= 0)
+                    {
+                        const bool isOwned = (owner->ownerId == (m_localPeerId - 1));
+
+                        phys.body.SetMotionType(
+                            isOwned ? BodyMotionType::Dynamic
+                            : BodyMotionType::Kinematic
+                        );
+                    }
+                    else
+                    {
+                        // ownerId == -1 means this is not an owned simulated object.
+                        // For non-animated, non-container objects, treat it as static.
+                        phys.body.SetMotionType(BodyMotionType::Static);
+                    }
                 }
                 else
                 {
-                    if (auto* owner = world.getComponent<OwnerComponent>(e))
-                    {
-                        if (owner->ownerId >= 0)
-                        {
-                            const bool isOwned = (owner->ownerId == (m_localPeerId - 1));
-                            phys.body.SetMotionType(isOwned ? BodyMotionType::Dynamic
-                                : BodyMotionType::Kinematic);
-                        }
-                    }
+                    // No owner component means this object is not a network-owned simulated body.
+                    // Static scene obstacles usually end up here.
+                    phys.body.SetMotionType(BodyMotionType::Static);
                 }
 
                 // Damping: only meaningful for dynamic bodies
@@ -98,6 +107,16 @@ public:
                     phys.body.SetLinearVelocity(vel->linearVelocity);
                     phys.body.SetAngularVelocity(vel->angularVelocity);
                 }
+                printf(
+                    "[PhysicsInit] entity=%u density=%.3f mass=%.3f invMass=%.6f restitution=%.3f sf=%.3f df=%.3f\n",
+                    (unsigned)e,
+                    phys.density,
+                    phys.body.Mass(),
+                    phys.body.InverseMass(),
+                    phys.restitution,
+                    phys.staticFriction,
+                    phys.dynamicFriction
+                );
 
                 phys.initialized = true;
             });

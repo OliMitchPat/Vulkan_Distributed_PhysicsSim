@@ -29,3 +29,9 @@ CollisionManifold Contain(const WorldSphere& a, const WorldCylinder& container);
 CollisionManifold Contain(const WorldCapsule& a, const WorldCylinder& container);
 CollisionManifold Contain(const WorldCylinder& a, const WorldCylinder& container);
 CollisionManifold Contain(const WorldOBB& a, const WorldCylinder& container);
+
+// -------- Capsule container --------
+CollisionManifold Contain(const WorldSphere& a, const WorldCapsule& container);
+CollisionManifold Contain(const WorldCapsule& a, const WorldCapsule& container);
+CollisionManifold Contain(const WorldCylinder& a, const WorldCapsule& container);
+CollisionManifold Contain(const WorldOBB& a, const WorldCapsule& container);

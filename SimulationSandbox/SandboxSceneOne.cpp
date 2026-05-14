@@ -452,17 +452,6 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
                 inst.textureName == "white.jpg" ||
                 inst.textureName == "white.png";
 
-            if (auto* shape = world.getComponent<ShapeComponent>(e))
-            {
-                if (shape->collisionType == CollisionType::CONTAINER)
-                {
-                    std::cout << "[RenderContainerAlphaDebug] entity="
-                        << static_cast<uint32_t>(e)
-                        << " mesh=\"" << inst.meshName << "\""
-                        << " alpha=" << inst.diffuseColor.a
-                        << "\n";
-                }
-            }
             snap->instances.push_back(std::move(inst));
 
         });

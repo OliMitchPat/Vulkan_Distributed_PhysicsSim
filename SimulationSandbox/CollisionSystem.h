@@ -33,12 +33,28 @@ public:
         TestSolidSolid();
         TestSolidContainer();
 
-        const int iterations = 8;
-        for (int i = 0; i < iterations; ++i)
+        const int velocityIterations = 8;
+
+        // First solve velocity impulses multiple times.
+        // This handles bounce, stopping, friction, and angular response.
+        for (int i = 0; i < velocityIterations; ++i)
         {
             for (auto& c : m_contacts)
             {
-                ResolveContact(*c.A, *c.B, c.manifold, c.material);
+                ResolveContactVelocity(*c.A, *c.B, c.manifold, c.material);
+            }
+        }
+
+        const int positionIterations = 1;
+
+        // Apply positional correction a small number of times.
+        // This is strong enough to prevent sinking, but much less jittery
+        // than doing it inside the full velocity solver loop.
+        for (int i = 0; i < positionIterations; ++i)
+        {
+            for (auto& c : m_contacts)
+            {
+                ResolveContactPosition(*c.A, *c.B, c.manifold);
             }
         }
 
@@ -458,6 +474,17 @@ private:
             case ShapeKind::Capsule:  m = Contain(inner.capsule, outer.cylinder); break;
             case ShapeKind::Cylinder: m = Contain(inner.cylinder, outer.cylinder); break;
             case ShapeKind::OBB:      m = Contain(inner.obb, outer.cylinder); break;
+            default: break;
+            }
+            break;
+
+        case ShapeKind::Capsule:
+            switch (inner.kind)
+            {
+            case ShapeKind::Sphere:   m = Contain(inner.sphere, outer.capsule); break;
+            case ShapeKind::Capsule:  m = Contain(inner.capsule, outer.capsule); break;
+            case ShapeKind::Cylinder: m = Contain(inner.cylinder, outer.capsule); break;
+            case ShapeKind::OBB:      m = Contain(inner.obb, outer.capsule); break;
             default: break;
             }
             break;

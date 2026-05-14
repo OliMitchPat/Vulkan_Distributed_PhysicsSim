@@ -687,11 +687,6 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 
                 mat.castsShadows = false;
                 mat.receivesShadows = false;
-
-                std::cout << "[ContainerRenderDebug] object=\"" << objName
-                    << "\" alpha=" << mat.alpha
-                    << " shape=" << ShapeDumpStr(rawShape, uniformScale)
-                    << "\n";
             }
 
             world.addComponent(e, mat);
@@ -699,6 +694,9 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 
         {
             PhysicsComponent phys{};
+
+            phys.density = density;
+
             phys.restitution = matProps.restitution;
             phys.staticFriction = matProps.staticFric;
             phys.dynamicFriction = matProps.dynamicFric;
@@ -1181,14 +1179,6 @@ void Scenario_FlatbufferScene::Update(World& world, float dt)
 
             payload.ownerId = static_cast<uint8_t>(
                 ResolveSpawnedOwnerId(base->owner(), rt.spawnCounter));
-
-            std::cout << "[SpawnerOwnerDebug] spawner=\""
-                << (base->name() ? base->name()->str() : "")
-                << "\" rawOwner=" << static_cast<int>(base->owner())
-                << " spawnCounter=" << rt.spawnCounter
-                << " finalOwnerId=" << static_cast<int>(payload.ownerId)
-                << " peer=" << (static_cast<int>(payload.ownerId) + 1)
-                << "\n";
 
             payload.shapeType = static_cast<uint8_t>(netShape);
 

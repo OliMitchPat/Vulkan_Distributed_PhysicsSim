@@ -2,7 +2,8 @@
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
-    vec4 params; // x=shadingModel, y=shininess, z=dayFactor (0 night..1 day)
+    vec4 params;
+    vec4 objectColor;
 } pushData;
 
 #define MAX_SPARK_LIGHTS 32
@@ -193,5 +194,5 @@ void main()
         lit = ubo.ambient.rgb + lightSum;
     }
 
-    outColor = vec4(albedo * lit, tex.a);
+    outColor = vec4(vtxColor, pushData.objectColor.a);
 }

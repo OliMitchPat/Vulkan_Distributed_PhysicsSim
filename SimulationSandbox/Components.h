@@ -51,6 +51,42 @@ struct OwnerComponent
     int ownerId = -1; // -1 = owned by all / local copy
 };
 
+
+//--------------------------------------------------    
+//Animated Components
+// --------------------------------------------------
+
+enum class AnimatedEasing
+{
+    Linear,
+    Smoothstep
+};
+
+enum class AnimatedPathMode
+{
+    Stop,
+    Loop,
+    Reverse
+};
+
+struct AnimatedWaypoint
+{
+    glm::vec3 position{ 0.0f };
+    glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f };
+    float time = 0.0f; // absolute time from animation start
+};
+
+struct AnimatedPathComponent
+{
+    std::vector<AnimatedWaypoint> waypoints;
+
+    float totalDuration = 0.0f;
+    float elapsed = 0.0f;
+
+    AnimatedEasing easing = AnimatedEasing::Linear;
+    AnimatedPathMode mode = AnimatedPathMode::Stop;
+};
+
 // --------------------------------------------------
 // PhysicsComponent
 // --------------------------------------------------
@@ -218,6 +254,9 @@ struct MaterialComponent
     glm::vec3 specularColor{ 1.0f, 1.0f, 1.0f };
     float shininess = 32.0f;
 
+    // 1.0 = opaque, 0.0 = fully transparent
+    float alpha = 1.0f;
+
     bool castsShadows = true;
     bool receivesShadows = true;
 
@@ -226,11 +265,13 @@ struct MaterialComponent
     MaterialComponent(ShadingModel model,
         const glm::vec3& diffuse,
         const glm::vec3& specular,
-        float shininessValue)
+        float shininessValue,
+        float alphaValue = 1.0f)
         : shadingModel(model),
         diffuseColor(diffuse),
         specularColor(specular),
-        shininess(shininessValue)
+        shininess(shininessValue),
+        alpha(alphaValue)
     {
     }
 };

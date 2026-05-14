@@ -2,7 +2,8 @@
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
-    vec4 params; // x=shadingModel, y=shininess
+    vec4 params;
+    vec4 objectColor;
 } pushData;
 
 #define MAX_SPARK_LIGHTS 32
@@ -64,7 +65,7 @@ void main()
 
 
     vtxTexCoord = inTexCoord;
-    vtxColor = inColor;
+    vtxColor = pushData.objectColor.rgb;
 
     vec3 V = normalize(ubo.cameraPos.xyz - vWorldPos);
     float shininess = pushData.params.y;

@@ -168,7 +168,7 @@ void RenderSystem::buildInstances(World& world, RenderScene& scene) const
             inst.textureName = meshComp.textureName;
 
             inst.shadingModel = material->shadingModel;
-            inst.diffuseColor = material->diffuseColor;
+            inst.diffuseColor = glm::vec4(material->diffuseColor, material->alpha);
             inst.specularColor = material->specularColor;
             inst.shininess = material->shininess;
             inst.castsShadows = material->castsShadows;

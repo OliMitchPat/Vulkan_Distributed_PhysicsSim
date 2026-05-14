@@ -138,11 +138,11 @@
     <ClInclude Include="NetPeer.h">
       <Filter>Header Files\Systems.h</Filter>
     </ClInclude>
-    <ClInclude Include="NetworkingSystem.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Scenario_FlatbufferScene.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NetworkingSystem.h">
+      <Filter>Header Files\Systems.h</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

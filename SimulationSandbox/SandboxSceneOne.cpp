@@ -362,19 +362,6 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
             auto* mat = world.getComponent<MaterialComponent>(e);
             if (!tr || !mat) return;
 
-            // ------------------------------------------------------------
-            // Shape-aware visual scaling
-            //
-            // Mesh authoring convention in this project:
-            // - sphere.obj has diameter 2 (radius 1) in model space
-            // - cube.obj is assumed to have size 2 (half-extents 1) in model space
-            //
-            // Therefore:
-            // - SphereShape.radius scales the unit sphere mesh to world radius
-            // - CuboidShape.size scales the unit cube mesh to world size
-            //
-            // TransformComponent.scale is an additional multiplier (often 1).
-            // ------------------------------------------------------------
             glm::vec3 visualScale = tr->scale;
 
             if (auto* shape = world.getComponent<ShapeComponent>(e))
@@ -433,8 +420,14 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
 
             inst.meshName = meshComp.meshName;
             inst.textureName = meshComp.textureName;
+            if (inst.meshName.empty())
+                return;
             inst.shadingModel = mat->shadingModel;
-            inst.diffuseColor = mat->diffuseColor;
+
+            // Use alpha from MaterialComponent.
+            // This requires RenderInstance::diffuseColor to be glm::vec4.
+            inst.diffuseColor = glm::vec4(mat->diffuseColor, mat->alpha);
+
             inst.specularColor = mat->specularColor;
             inst.shininess = mat->shininess;
             inst.castsShadows = mat->castsShadows;
@@ -445,7 +438,7 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
             {
                 if (auto* owner = world.getComponent<OwnerComponent>(e))
                 {
-                    inst.diffuseColor = OwnerColor(owner->ownerId);
+                    inst.diffuseColor = glm::vec4(OwnerColor(owner->ownerId), mat->alpha);
                     inst.specularColor = glm::vec3(0.05f);
                     inst.shininess = 4.0f;
                 }
@@ -453,8 +446,25 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
 
             if (gForceShading == 0) inst.shadingModel = ShadingModel::Gouraud;
             if (gForceShading == 1) inst.shadingModel = ShadingModel::Phong;
+            static int colourDebugCount = 0;
 
+            const bool isFlatbufferObject =
+                inst.textureName == "white.jpg" ||
+                inst.textureName == "white.png";
+
+            if (auto* shape = world.getComponent<ShapeComponent>(e))
+            {
+                if (shape->collisionType == CollisionType::CONTAINER)
+                {
+                    std::cout << "[RenderContainerAlphaDebug] entity="
+                        << static_cast<uint32_t>(e)
+                        << " mesh=\"" << inst.meshName << "\""
+                        << " alpha=" << inst.diffuseColor.a
+                        << "\n";
+                }
+            }
             snap->instances.push_back(std::move(inst));
+
         });
 
     // Directional lights
@@ -543,7 +553,7 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
 static void SimulationThreadFunc(SimSharedState& shared, World& world,
     ScenarioManager& scenarios,
     PhysicsSystem& physicsSystem,
-    CollisionSystem& collisionSystem)
+    CollisionSystem& collisionSystem, int localPeerId)
 {
     // Affinity + name
     const int numCores = ThreadUtils::LogicalCoreCount();
@@ -680,15 +690,41 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 if (!phys || !tr) continue;
 
                 // Don't override authoritative bodies
-                if (phys->body.IsDynamic()) continue;
+                auto* owner = world.getComponent<OwnerComponent>(e);
+
+                // Never apply remote snapshots onto objects owned by this local peer.
+                if (owner && owner->ownerId == localPeerId - 1)
+                    continue;
+
+                // Static/local-all objects should not be driven by network snapshots.
+                if (owner && owner->ownerId < 0)
+                    continue;
 
                 ReplicaState target{};
                 bool usedExtrapolation = false;
                 if (!SampleReplicaStateAtTime(ring, sampleTimeSec, maxExtrapSec, target, usedExtrapolation))
                     continue;
 
-                if (!smoothingEnabled)
-                {
+                /*std::cout << "[SnapshotApplyDebug] localPeer="
+                    << localPeerId
+                    << " entity=" << e
+                    << " ownerId=" << (owner ? owner->ownerId : -999)
+                    << " currentPos=("
+                    << phys->body.Position().x << ","
+                    << phys->body.Position().y << ","
+                    << phys->body.Position().z << ")"
+                    << " targetPos=("
+                    << target.pos.x << ","
+                    << target.pos.y << ","
+                    << target.pos.z << ")"
+                    << " targetVel=("
+                    << target.linVel.x << ","
+                    << target.linVel.y << ","
+                    << target.linVel.z << ")"
+                    << " smoothing=" << (smoothingEnabled ? "yes" : "no")
+                    << "\n";
+                    */
+                
                     phys->body.SetPosition(target.pos);
                     phys->body.SetOrientation(target.rot);
                     phys->body.SetLinearVelocity(target.linVel);
@@ -696,7 +732,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     tr->position = target.pos;
                     tr->rotation = glm::eulerAngles(target.rot);
                     continue;
-                }
+                
 
                 const glm::vec3 currentPos = phys->body.Position();
                 const glm::quat currentRot = phys->body.Orientation();
@@ -795,8 +831,26 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
             world.forEach<PhysicsComponent>([&](Entity e, PhysicsComponent& phys)
                 {
-                    if (!phys.body.IsDynamic())
+                    auto* owner = world.getComponent<OwnerComponent>(e);
+
+                    // Only simulated owned objects should be sent by this peer.
+                    // ownerId is 0-based, localPeerId is 1-based.
+                    if (!owner)
                         return;
+
+                    if (owner->ownerId != localPeerId - 1)
+                        return;
+
+                    if (!phys.body.IsDynamic())
+                    {
+                        std::cout << "[SnapshotBuildWarn] localPeer="
+                            << localPeerId
+                            << " entity=" << e
+                            << " ownerId=" << owner->ownerId
+                            << " ownedButNotDynamic=1"
+                            << "\n";
+                        return;
+                    }
 
                     Net::StateSnapshotItem it{};
                     it.objectId = (uint32_t)e;
@@ -806,6 +860,14 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     const glm::vec3 v = phys.body.LinearVelocity();
                     const glm::vec3 w = phys.body.AngularVelocity();
 
+                   /* std::cout << "[SnapshotBuildDebug] localPeer="
+                        << localPeerId
+                        << " entity=" << e
+                        << " ownerId=" << owner->ownerId
+                        << " pos=(" << p.x << "," << p.y << "," << p.z << ")"
+                        << " vel=(" << v.x << "," << v.y << "," << v.z << ")"
+                        << "\n";
+                       */
                     it.pos = { p.x, p.y, p.z };
                     it.rot = { q.x, q.y, q.z, q.w };
                     it.linVel = { v.x, v.y, v.z };
@@ -833,6 +895,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& cfg)
 {
     using namespace Net;
+    const int localPeerId = cfg.peer_id;
 
     // ---- Thread setup ----
     const int numCores = ThreadUtils::LogicalCoreCount();
@@ -1002,9 +1065,11 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 // ============================================================================
 int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cfg)
 {
-    World            world;
-    PhysicsSystem    physicsSystem;
-    physicsSystem.SetLocalPeerId(cfg.peer_id);
+    const int localPeerId = cfg.peer_id;
+
+    World world;
+    PhysicsSystem physicsSystem;
+    physicsSystem.SetLocalPeerId(localPeerId);
 
     CollisionSystem  collisionSystem;
     ScenarioManager  scenarios;
@@ -1015,11 +1080,16 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/piston.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/sphereSpawners.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/tumbler.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/elasticityDemo.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/gridDropSpheres.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/wavePlatforms.bin"));
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/weightedCradle.bin"));
+
 
     for (int i = 0; i < scenarios.Count(); ++i)
     {
         if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(scenarios.Get(i)))
-            fb->SetLocalPeerId(cfg.peer_id);
+            fb->SetLocalPeerId(localPeerId);
     }
 
     if (scenarios.Count() > 0)
@@ -1080,10 +1150,15 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     shared.snapshotBuf.publish(CaptureSnapshot(world, 0, shared));
 
     // Start background threads
-    std::thread simThread(SimulationThreadFunc,
-        std::ref(shared), std::ref(world),
-        std::ref(scenarios), std::ref(physicsSystem),
-        std::ref(collisionSystem));
+    std::thread simThread(
+        SimulationThreadFunc,
+        std::ref(shared),
+        std::ref(world),
+        std::ref(scenarios),
+        std::ref(physicsSystem),
+        std::ref(collisionSystem),
+        localPeerId
+    );
 
     std::thread netThread(NetworkingThreadFunc, std::ref(shared), std::cref(cfg));
 

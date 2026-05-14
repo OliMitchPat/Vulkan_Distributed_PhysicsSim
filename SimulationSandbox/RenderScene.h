@@ -55,7 +55,7 @@ struct RenderInstance
     std::string textureName;    // from RenderMeshComponent
 
     ShadingModel shadingModel = ShadingModel::Phong;
-    glm::vec3 diffuseColor{ 1.0f, 1.0f, 1.0f };
+    glm::vec4 diffuseColor{ 1.0f, 1.0f, 1.0f, 1.0f };   
     glm::vec3 specularColor{ 1.0f, 1.0f, 1.0f };
     float shininess = 32.0f;
 

@@ -31,6 +31,7 @@ struct PushConstObject
 {
     glm::mat4 model;
     glm::vec4 params;
+    glm::vec4 objectColor;
 };
 
 
@@ -763,6 +764,12 @@ void Renderer::cleanupVulkan()
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr);
 
+    if (transparentGraphicsPipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, transparentGraphicsPipeline, nullptr);
+        transparentGraphicsPipeline = VK_NULL_HANDLE;
+    }
+
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroyBuffer(device, uniformBuffers[i], nullptr);
         vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
@@ -1217,14 +1224,6 @@ void Renderer::createGraphicsPipeline() {
     multisampling.sampleShadingEnable = VK_FALSE;
     multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-    depthStencil.depthBoundsTestEnable = VK_FALSE;
-    depthStencil.stencilTestEnable = VK_FALSE;
-
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -1275,6 +1274,13 @@ void Renderer::createGraphicsPipeline() {
         throw std::runtime_error("failed to create pipeline layout!");
     }
 
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1293,9 +1299,52 @@ void Renderer::createGraphicsPipeline() {
     pipelineInfo.subpass = 0;
     pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
+    // ------------------------------------------------------------
+    // Main opaque object pipeline
+    // ------------------------------------------------------------
+    std::cout << "[PipelineDebug] Creating main object pipeline\n";
+
+    depthStencil.depthWriteEnable = VK_TRUE;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+
     if (vkCreateGraphicsPipelines(
-        device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+        device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineInfo,
+        nullptr,
+        &graphicsPipeline) != VK_SUCCESS)
+    {
         throw std::runtime_error("failed to create graphics pipeline!");
+    }
+
+    // ------------------------------------------------------------
+    // Transparent object pipeline
+    // ------------------------------------------------------------
+    std::cout << "[PipelineDebug] Creating transparent object pipeline\n";
+
+    depthStencil.depthWriteEnable = VK_FALSE;
+
+    colorBlendAttachment.blendEnable = VK_TRUE;
+    colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+
+    if (vkCreateGraphicsPipelines(
+        device,
+        VK_NULL_HANDLE,
+        1,
+        &pipelineInfo,
+        nullptr,
+        &transparentGraphicsPipeline) != VK_SUCCESS)
+    {
+        throw std::runtime_error("failed to create transparent graphics pipeline!");
     }
 
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
@@ -1950,6 +1999,7 @@ void Renderer::recordCommandBuffer(
             pc.params.x = (inst.shadingModel == ShadingModel::Gouraud) ? 0.0f : 1.0f;
             pc.params.y = inst.shininess;
             pc.params.z = dayFactor;
+            pc.objectColor = inst.diffuseColor;
             pc.params.w = 0.0f;
 
             vkCmdPushConstants(
@@ -1975,18 +2025,33 @@ void Renderer::recordCommandBuffer(
     for (const auto& inst : currentScene->instances)
     {
         if (isGlobe(inst)) continue;
+        if (inst.diffuseColor.a < 0.99f) continue;
 
         const GpuTexture& tex = getOrLoadTexture(inst.textureName);
         drawInstance(inst, pipelineLayout, tex.descriptorSet);
     }
 
     // ---------------------
-    // PASS 2: PARTICLES
+    // PASS 2: TRANSPARENT OBJECTS / CONTAINERS
+    // ---------------------
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, transparentGraphicsPipeline);
+
+    for (const auto& inst : currentScene->instances)
+    {
+        if (isGlobe(inst)) continue;
+        if (inst.diffuseColor.a >= 0.99f) continue;
+
+        const GpuTexture& tex = getOrLoadTexture(inst.textureName);
+        drawInstance(inst, pipelineLayout, tex.descriptorSet);
+    }
+
+    // ---------------------
+    // PASS 3: PARTICLES
     // ---------------------
     recordParticles(commandBuffer, imageIndex);
 
     // ---------------------
-    // PASS 3: GLOBE (LAST)
+    // PASS 4: GLOBE (LAST)
     // ---------------------
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, globePipeline);
 
@@ -1994,7 +2059,6 @@ void Renderer::recordCommandBuffer(
     {
         if (!isGlobe(inst)) continue;
 
-        // IMPORTANT: globe uses the special set1 with day+night
         drawInstance(inst, globePipelineLayout, globeSkyDescriptorSet);
     }
 

@@ -60,18 +60,15 @@ public:
                 {
                     phys.body.SetMotionType(BodyMotionType::Static);
                 }
+                else if (world.getComponent<AnimatedPathComponent>(e))
+                {
+                    // Animated objects are externally driven by Scenario_FlatbufferScene::Update.
+                    // They must collide as moving kinematic bodies, but physics impulses must not
+                    // alter their path or velocity.
+                    phys.body.SetMotionType(BodyMotionType::Kinematic);
+                }
                 else
                 {
-                    // --------------------------------------------------
-                    // Milestone 5: Ownership -> motion type mapping
-                    //
-                    // Convention:
-                    // - OwnerComponent.ownerId == -1 => owned by all (static/animated/local)
-                    // - OwnerComponent.ownerId >= 0  => simulated object owned by a peer
-                    //
-                    // Local peer id from config is 1..4.
-                    // We assume ownerId is stored as 0..3 (ObjectOwnerType - 1).
-                    // --------------------------------------------------
                     if (auto* owner = world.getComponent<OwnerComponent>(e))
                     {
                         if (owner->ownerId >= 0)

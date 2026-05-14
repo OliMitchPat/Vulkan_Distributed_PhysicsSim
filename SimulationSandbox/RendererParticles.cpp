@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cstddef> // offsetof
 #include "PipelineCommon.h" 
+#include <iostream>
 // -------------------------
 // Task 3.2: Create buffers
 // -------------------------
@@ -176,7 +177,7 @@ void Renderer::createParticlePipeline()
     pipe.layout = particlePipelineLayout;
     pipe.renderPass = renderPass;
     pipe.subpass = 0;
-
+    std::cout << "[PipelineDebug] Creating particle pipeline\n";
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipe, nullptr, &particlePipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create particle pipeline!");
 

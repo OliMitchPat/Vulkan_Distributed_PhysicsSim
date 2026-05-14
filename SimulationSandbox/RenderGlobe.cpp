@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <array>
 #include "PipelineCommon.h"
+#include <iostream>
 
 void Renderer::createGlobePipeline()
 {
@@ -53,7 +54,7 @@ void Renderer::createGlobePipeline()
     pipe.layout = globePipelineLayout;
     pipe.renderPass = renderPass;
     pipe.subpass = 0;
-
+    std::cout << "[PipelineDebug] Creating globe pipeline\n";
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipe, nullptr, &globePipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create globe pipeline!");
 

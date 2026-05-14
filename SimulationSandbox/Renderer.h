@@ -65,6 +65,7 @@ struct UniformBufferObject
 struct PushConstantObject1 {
     glm::mat4 model;
     glm::vec4 params;
+    glm::vec4 objectColor;
 };
 
 
@@ -138,7 +139,7 @@ private:
     VkDescriptorSetLayout textureSetLayout = VK_NULL_HANDLE;  
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline = VK_NULL_HANDLE;
-
+    VkPipeline transparentGraphicsPipeline = VK_NULL_HANDLE;
     // --- Texture ---
     VkImage textureImage = VK_NULL_HANDLE;
     VkDeviceMemory textureImageMemory = VK_NULL_HANDLE;

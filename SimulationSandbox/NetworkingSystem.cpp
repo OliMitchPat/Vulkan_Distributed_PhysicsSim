@@ -176,12 +176,6 @@ namespace Net
                 if (h->protocolVersion == PROTOCOL_VERSION &&
                     (MsgType)h->msgType == MsgType::GLOBAL_COMMAND)
                 {
-                    std::cout
-                        << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% GOT GLOBAL_COMMAND"
-                        << " size=" << size
-                        << " fromPeerId=" << (int)h->peerId
-                        << " seq=" << h->seq
-                        << "\n";
                 }
             }
 
@@ -219,10 +213,6 @@ namespace Net
                 {
                     if (msg.retries >= MAX_RETRIES)
                     {
-                        std::cout << "[NET] Drop reliable msg seq=" << msg.seq
-                            << " to peer " << peer.peerId
-                            << " (max retries reached)\n";
-
                         peer.resendQueue.erase(peer.resendQueue.begin() + i);
                         continue;
                     }
@@ -303,21 +293,12 @@ namespace Net
 
             const size_t after = queue.size();
 
-            std::cout << "[ACK] recv from hdrPeerId=" << (int)hdr->peerId
-                << " mappedPeer=" << peer->peerId
-                << " ackSeq=" << ackSeq
-                << " q " << before << " -> " << after << "\n";
             break;
         }
         case MsgType::GLOBAL_COMMAND:
         {
             // Always ACK reliable messages (even duplicates)
             SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
-
-            std::cout << "///////////////////////////////////////////////////////////////////// RAW GLOBAL from peer=" << (int)hdr->peerId
-                << " seq=" << hdr->seq
-                << " last=" << peer->lastReceivedSeq
-                << " size=" << size << "\n";
 
             // Duplicate suppression
             if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)

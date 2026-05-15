@@ -218,9 +218,16 @@ struct SimSharedState
     // 0 = colour by material, 1 = colour by owner
     std::atomic<int> displayMode{ 0 };
 
+    // Current scene instance ID.
+ // Incremented only by the peer that initiates a scene change.
+ // Receivers copy the value from the incoming scene-change command.
+    std::atomic<uint32_t> sceneGeneration{ 1 };
+    std::atomic<bool> sceneTransitionActive{ false };
+    std::atomic<float> sceneTransitionRemainingSec{ 0.0f };
     // Outgoing GLOBAL UI requests (render thread -> networking thread)
     std::atomic<bool> sendSceneChange{ false };
     std::atomic<int>  sendSceneIndex{ -1 };
+    std::atomic<uint32_t> sendSceneGeneration{ 1 };
 
     std::atomic<bool> sendGravityChange{ false };
     std::atomic<bool> sendGravityEnabled{ true };
@@ -228,10 +235,10 @@ struct SimSharedState
     // Incoming GLOBAL UI commands (networking thread -> sim thread)
     std::atomic<bool> pendingSceneChange{ false };
     std::atomic<int>  pendingSceneIndex{ -1 };
+    std::atomic<uint32_t> pendingSceneGeneration{ 1 };
 
     std::atomic<bool> pendingGravityChange{ false };
     std::atomic<bool> pendingGravityEnabled{ true };
-
     // Shared clear-colour (4 floats; written by UI, read by sim for snapshot)
     float clearColour[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
     std::mutex clearColourMutex;
@@ -245,7 +252,8 @@ struct SimSharedState
     std::atomic<float> measuredRenderHz{ 0.0f };
     std::atomic<float> measuredNetworkHz{ 0.0f };
     std::atomic<float> measuredSimHz{ 0.0f };
-
+    std::mutex netStatsMutex;
+    Net::NetworkStats netStats{};
     // Core indices actually assigned (for UI display)
     int renderCoreAssigned = ThreadUtils::CORE_RENDER;
     int netCoreAssigned = ThreadUtils::CORE_NET_0;
@@ -754,9 +762,93 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
         if (Scenario* s = scenarios.Current())
         {
+            // ------------------------------------------------------------
+            // Scene transition pause.
+            //
+            // During this pause:
+            // - do not apply incoming spawns
+            // - do not update spawners
+            // - do not step physics
+            // - do not generate outgoing spawn events
+            //
+            // This gives remote peers time to load the same scene/generation
+            // before owner peers start spawning and simulating objects.
+            // ------------------------------------------------------------
+
+            if (shared.sceneTransitionActive.load(std::memory_order_acquire))
+            {
+                float remaining =
+                    shared.sceneTransitionRemainingSec.load(std::memory_order_relaxed);
+
+                // Count down using the real sim-thread frame delta.
+                // Do this once per outer sim loop frame, not once per fixed physics step.
+                remaining -= dt;
+
+                std::cout << "[TRANSITION TICK] remaining="
+                    << remaining
+                    << " dt="
+                    << dt
+                    << "\n";
+
+                if (remaining <= 0.0f)
+                {
+                    shared.sceneTransitionRemainingSec.store(0.0f, std::memory_order_relaxed);
+                    shared.sceneTransitionActive.store(false, std::memory_order_release);
+
+                    // Clear any object traffic that slipped through during transition.
+                    {
+                        std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                        shared.inSpawnEvents.clear();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                        shared.outSpawnEvents.clear();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                        shared.inReplicaHistory.clear();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                        shared.outOwnedItems.clear();
+                        shared.outTick = 0;
+                        shared.outDirty = false;
+                    }
+
+                    accumulator = 0.0f;
+
+                    std::cout << "[SCENE START] gen="
+                        << shared.sceneGeneration.load(std::memory_order_acquire)
+                        << "\n";
+                }
+                else
+                {
+                    shared.sceneTransitionRemainingSec.store(
+                        remaining,
+                        std::memory_order_relaxed);
+
+                    // Skip the rest of this simulation frame.
+                    // Important: call endFrame before continue so the loop controller
+                    // still sleeps/throttles instead of spinning and burning the delay instantly.
+                    lc.endFrame();
+                    continue;
+                }
+            }
+
+            const uint32_t currentSceneGeneration =
+                shared.sceneGeneration.load(std::memory_order_acquire);
+
+            // ------------------------------------------------------------
+            // Apply incoming network spawns only after transition is complete.
+            // ------------------------------------------------------------
+
             if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
             {
                 std::vector<Net::SpawnObjectPayload> incomingSpawns;
+
                 {
                     std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
                     incomingSpawns.swap(shared.inSpawnEvents);
@@ -764,9 +856,16 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                 for (const auto& payload : incomingSpawns)
                 {
+                    if (payload.sceneGeneration != currentSceneGeneration)
+                        continue;
+
                     fb->SpawnFromNetworkEvent(world, payload);
                 }
             }
+
+            // ------------------------------------------------------------
+            // Update simulation.
+            // ------------------------------------------------------------
 
             if (useFixed)
             {
@@ -777,9 +876,10 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                 while (accumulator >= fdt)
                 {
-                    s->Update(world, fdt);
+                    s->Update(world, fdt, currentSceneGeneration);
                     physicsSystem.Update(world, fdt);
                     collisionSystem.Update(world);
+
                     accumulator -= fdt;
                     ++tickNumber;
                 }
@@ -788,27 +888,40 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             {
                 if (running || doStep)
                 {
-                    float stepDt = running ? dt : fdt;
-                    s->Update(world, stepDt);
+                    const float stepDt = running ? dt : fdt;
+
+                    s->Update(world, stepDt, currentSceneGeneration);
                     physicsSystem.Update(world, stepDt);
                     collisionSystem.Update(world);
+
                     ++tickNumber;
                 }
             }
+
+            // ------------------------------------------------------------
+            // Collect locally generated spawns only after transition is complete.
+            // ------------------------------------------------------------
 
             if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
             {
                 Net::SpawnObjectPayload spawnPayload{};
                 std::vector<Net::SpawnObjectPayload> generated;
+
                 while (fb->PopPendingSpawn(spawnPayload))
                 {
+                    if (spawnPayload.sceneGeneration != currentSceneGeneration)
+                        continue;
+
                     generated.push_back(spawnPayload);
                 }
 
                 if (!generated.empty())
                 {
                     std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
-                    shared.outSpawnEvents.insert(shared.outSpawnEvents.end(), generated.begin(), generated.end());
+                    shared.outSpawnEvents.insert(
+                        shared.outSpawnEvents.end(),
+                        generated.begin(),
+                        generated.end());
                 }
             }
         }
@@ -816,7 +929,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
         // ----- Milestone 5: build outgoing STATE_SNAPSHOT (owned dynamics) -----
         {
             std::vector<Net::StateSnapshotItem> items;
-            items.reserve(256);
+            items.reserve(4096);
 
             world.forEach<PhysicsComponent>([&](Entity e, PhysicsComponent& phys)
                 {
@@ -902,9 +1015,9 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
     LoopController lc(shared.targetNetworkHz.load(std::memory_order_relaxed));
 
-    // Snapshot send throttling (prevents UDP flood starving GLOBAL commands)
+    // Snapshot send throttling.
     float snapshotSendAccum = 0.0f;
-    constexpr float SNAPSHOT_SEND_HZ = 20.0f;                 // tune: 15–30 is usually fine
+    constexpr float SNAPSHOT_SEND_HZ = 20.0f;
     constexpr float SNAPSHOT_SEND_INTERVAL = 1.0f / SNAPSHOT_SEND_HZ;
 
     while (shared.appRunning.load(std::memory_order_relaxed))
@@ -914,6 +1027,10 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
         float dt = lc.beginFrame();
         shared.measuredNetworkHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
 
+        // Keep networking layer aligned with the currently valid scene generation.
+        net.SetCurrentSceneGeneration(
+            shared.sceneGeneration.load(std::memory_order_acquire));
+
         Net::SnapshotImpairmentSettings impair{};
         impair.enabled = shared.netImpairmentEnabled.load(std::memory_order_relaxed);
         impair.latencyMs = shared.netLatencyMs.load(std::memory_order_relaxed);
@@ -921,35 +1038,86 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
         impair.dropPercent = shared.netDropPercent.load(std::memory_order_relaxed);
         net.SetSnapshotImpairment(impair);
 
-        net.Update(dt);
+        // ------------------------------------------------------------
+        // High-priority outgoing global commands.
+        // These must happen before net.Update(dt), so they are not stuck
+        // behind snapshot/resend processing.
+        // ------------------------------------------------------------
 
-        // ---- Send outgoing global commands (from render thread) ----
         if (shared.sendSceneChange.exchange(false, std::memory_order_acq_rel))
         {
-            const int idx = shared.sendSceneIndex.load(std::memory_order_relaxed);
-            net.SendSceneChange(idx);
+            const int idx =
+                shared.sendSceneIndex.load(std::memory_order_relaxed);
+
+            const uint32_t generation =
+                shared.sendSceneGeneration.load(std::memory_order_acquire);
+
+            // Old scene object traffic is no longer valid.
+            net.ClearSceneObjectTraffic();
+            net.PauseSnapshotTraffic(0.25f);
+            net.SetCurrentSceneGeneration(generation);
+
+            net.SendSceneChange(idx, generation);
         }
 
         if (shared.sendGravityChange.exchange(false, std::memory_order_acq_rel))
         {
-            const bool enabled = shared.sendGravityEnabled.load(std::memory_order_relaxed);
+            const bool enabled =
+                shared.sendGravityEnabled.load(std::memory_order_relaxed);
+
+            net.PauseSnapshotTraffic(0.10f);
             net.SendGravityEnabled(enabled);
         }
 
-        // ---- Milestone 7: send SPAWN_OBJECT (reliable) ----
+        // ------------------------------------------------------------
+        // Process sockets / ACKs / reliable resends / delayed snapshots.
+        // ------------------------------------------------------------
+
+        net.Update(dt);
+
+        {
+            std::lock_guard<std::mutex> lk(shared.netStatsMutex);
+            shared.netStats = net.GetStats();
+        }
+
+        // ------------------------------------------------------------
+        // Send SPAWN_OBJECT packets.
+        //
+        // Important: do not send stale spawn events from an older scene
+        // generation.
+        // ------------------------------------------------------------
+
+        if (shared.sceneTransitionActive.load(std::memory_order_acquire))
+        {
+            std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+            shared.outSpawnEvents.clear();
+        }
+        else
         {
             std::vector<SpawnObjectPayload> pending;
+
             {
                 std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
                 if (!shared.outSpawnEvents.empty())
                     pending.swap(shared.outSpawnEvents);
             }
 
+            const uint32_t currentGeneration =
+                shared.sceneGeneration.load(std::memory_order_acquire);
+
             for (const auto& spawn : pending)
+            {
+                if (spawn.sceneGeneration != currentGeneration)
+                    continue;
+
                 net.SendSpawnObject(spawn);
+            }
         }
 
-        // ---- Receive incoming global commands and forward to sim thread ----
+        // ------------------------------------------------------------
+        // Receive incoming global commands and forward to sim thread.
+        // ------------------------------------------------------------
+
         GlobalCommandPayload cmd{};
         while (net.PopReceivedGlobalCommand(cmd))
         {
@@ -957,26 +1125,90 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
             const ULONGLONG t = GetTickCount64();
             std::cout << "[T] NET popped GLOBAL cmd scene=" << cmd.sceneIndex
+                << " generation=" << cmd.sceneGeneration
                 << " t=" << t << "ms\n";
 
             if (type == GlobalCommandType::SceneChange)
             {
-                shared.pendingSceneIndex.store(cmd.sceneIndex, std::memory_order_relaxed);
-                shared.pendingSceneChange.store(true, std::memory_order_release);
+                // Use the sender's generation.
+                // Do NOT increment locally on received scene changes.
+                shared.sceneGeneration.store(
+                    cmd.sceneGeneration,
+                    std::memory_order_release);
+
+                shared.pendingSceneGeneration.store(
+                    cmd.sceneGeneration,
+                    std::memory_order_release);
+
+                shared.pendingSceneIndex.store(
+                    cmd.sceneIndex,
+                    std::memory_order_relaxed);
+
+                shared.pendingSceneChange.store(
+                    true,
+                    std::memory_order_release);
+
+                // Keep network layer immediately aligned too.
+                net.SetCurrentSceneGeneration(cmd.sceneGeneration);
+
+                // Clear any outgoing old-scene object data.
+                {
+                    std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                    shared.outOwnedItems.clear();
+                    shared.outTick = 0;
+                    shared.outDirty = false;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                    shared.outSpawnEvents.clear();
+                }
+
+                // Also clear incoming old-scene data.
+                {
+                    std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                    shared.inReplicaHistory.clear();
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                    shared.inSpawnEvents.clear();
+                }
+
+                net.ClearSceneObjectTraffic();
+                net.PauseSnapshotTraffic(0.25f);
             }
             else if (type == GlobalCommandType::GravityOnOff)
             {
-                shared.pendingGravityEnabled.store(cmd.gravityEnabled != 0, std::memory_order_relaxed);
-                shared.pendingGravityChange.store(true, std::memory_order_release);
+                shared.pendingGravityEnabled.store(
+                    cmd.gravityEnabled != 0,
+                    std::memory_order_relaxed);
+
+                shared.pendingGravityChange.store(
+                    true,
+                    std::memory_order_release);
             }
         }
 
-        // ---- Milestone 5: send STATE_SNAPSHOT (throttled) ----
+        // ------------------------------------------------------------
+        // Send STATE_SNAPSHOT packets.
+        // ------------------------------------------------------------
+
         snapshotSendAccum += dt;
 
-        if (snapshotSendAccum >= SNAPSHOT_SEND_INTERVAL)
+        if (shared.sceneTransitionActive.load(std::memory_order_acquire))
         {
-            // keep leftover time (more stable than setting to 0)
+            // Drop any old outgoing snapshot data generated during transition.
+            std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+            shared.outOwnedItems.clear();
+            shared.outTick = 0;
+            shared.outDirty = false;
+
+            // Avoid immediately sending a snapshot burst when transition ends.
+            snapshotSendAccum = 0.0f;
+        }
+        else if (snapshotSendAccum >= SNAPSHOT_SEND_INTERVAL)
+        {
             snapshotSendAccum -= SNAPSHOT_SEND_INTERVAL;
 
             std::vector<StateSnapshotItem> items;
@@ -986,9 +1218,10 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             {
                 std::lock_guard<std::mutex> lk(shared.outSnapMutex);
                 dirty = shared.outDirty;
+
                 if (dirty)
                 {
-                    items = shared.outOwnedItems; // copy latest
+                    items = shared.outOwnedItems;
                     tick = shared.outTick;
                     shared.outDirty = false;
                 }
@@ -996,11 +1229,23 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
 
             if (dirty && !items.empty())
             {
-                net.SendStateSnapshot(tick, items.data(), (uint16_t)items.size());
+                const uint32_t generation =
+                    shared.sceneGeneration.load(std::memory_order_acquire);
+
+                net.SendStateSnapshot(
+                    tick,
+                    generation,
+                    items.data(),
+                    (uint32_t)items.size());
             }
         }
 
-        // ---- Milestone 5: receive STATE_SNAPSHOT and store latest per object ----
+        // ------------------------------------------------------------
+        // Receive STATE_SNAPSHOT packets.
+        // NetworkingSystem already filters by sceneGeneration, but we
+        // also only store what it gives us here.
+        // ------------------------------------------------------------
+
         {
             std::vector<StateSnapshotItem> items;
             uint32_t tick = 0;
@@ -1015,7 +1260,7 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
                     ReplicaState st{};
                     st.objectId = it.objectId;
                     st.pos = glm::vec3(it.pos.x, it.pos.y, it.pos.z);
-                    st.rot = glm::quat(it.rot.w, it.rot.x, it.rot.y, it.rot.z); // glm quat is (w,x,y,z)
+                    st.rot = glm::quat(it.rot.w, it.rot.x, it.rot.y, it.rot.z);
                     st.linVel = glm::vec3(it.linVel.x, it.linVel.y, it.linVel.z);
                     st.angVel = glm::vec3(it.angVel.x, it.angVel.y, it.angVel.z);
                     st.tick = tick;
@@ -1027,25 +1272,39 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             }
         }
 
-        // ---- Milestone 7: receive SPAWN_OBJECT and forward to sim thread ----
+        // ------------------------------------------------------------
+        // Receive SPAWN_OBJECT packets and forward to sim thread.
+        // NetworkingSystem already filters by sceneGeneration, but we
+        // filter again here for safety.
+        // ------------------------------------------------------------
+
         {
             SpawnObjectPayload payload{};
             std::vector<SpawnObjectPayload> received;
+
+            const uint32_t currentGeneration =
+                shared.sceneGeneration.load(std::memory_order_acquire);
+
             while (net.PopReceivedSpawnObject(payload))
             {
+                if (payload.sceneGeneration != currentGeneration)
+                    continue;
+
                 received.push_back(payload);
             }
 
             if (!received.empty())
             {
                 std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
-                shared.inSpawnEvents.insert(shared.inSpawnEvents.end(), received.begin(), received.end());
+                shared.inSpawnEvents.insert(
+                    shared.inSpawnEvents.end(),
+                    received.begin(),
+                    received.end());
             }
         }
 
         lc.endFrame();
     }
-
     net.Shutdown();
 }
 
@@ -1305,13 +1564,50 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                         if (si != currentIdx)
                         {
                             const ULONGLONG t = GetTickCount64();
+
+                            const uint32_t newGeneration =
+                                shared.sceneGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+
                             std::cout << "[T] UI scene click idx=" << si
+                                << " gen=" << newGeneration
                                 << " t=" << t << "ms\n";
 
-                            // Apply locally immediately
+                            // Local scene switch invalidates old outgoing/incoming network state.
+                            {
+                                std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                                shared.outOwnedItems.clear();
+                                shared.outTick = 0;
+                                shared.outDirty = false;
+                            }
+
+                            {
+                                std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                                shared.outSpawnEvents.clear();
+                            }
+
+                            {
+                                std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                                shared.inReplicaHistory.clear();
+                            }
+
+                            {
+                                std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                                shared.inSpawnEvents.clear();
+                            }
+
+                            // Start a short transition pause.
+                            // The scene can load locally, but sim/spawners/snapshots should not run yet.
+                            shared.sceneTransitionActive.store(true, std::memory_order_release);
+                            shared.sceneTransitionRemainingSec.store(0.10f, std::memory_order_release);
+                            std::cout << "[TRANSITION BEGIN UI] delay="
+                                << shared.sceneTransitionRemainingSec.load(std::memory_order_acquire)
+
+                                << "\n";
+                            // Apply locally immediately.
                             shared.requestedSceneIndex.store(si, std::memory_order_release);
 
-                            // Send globally
+                            // Send globally with the same generation.
+                            shared.sendSceneGeneration.store(newGeneration, std::memory_order_release);
                             shared.sendSceneIndex.store(si, std::memory_order_relaxed);
                             shared.sendSceneChange.store(true, std::memory_order_release);
                         }
@@ -1411,6 +1707,42 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                         shared.netDropPercent.store(20.0f, std::memory_order_relaxed);
                     }
                 }
+                ImGui::Separator();
+
+                ImGui::SeparatorText("Network Debug Stats");
+                {
+                    Net::NetworkStats netStats{};
+                    {
+                        std::lock_guard<std::mutex> lk(shared.netStatsMutex);
+                        netStats = shared.netStats;
+                    }
+
+                    ImGui::Text("Snapshot packets sent     : %u", netStats.snapshotPacketsSent);
+                    ImGui::Text("Snapshot packets received : %u", netStats.snapshotPacketsReceived);
+                    ImGui::Text("Snapshot packets dropped  : %u", netStats.snapshotPacketsDropped);
+                    ImGui::Text("Snapshot packets delayed  : %u", netStats.snapshotPacketsDelayed);
+
+                    const uint32_t totalSnapshotAttempts =
+                        netStats.snapshotPacketsSent + netStats.snapshotPacketsDropped;
+
+                    const float measuredDropPercent =
+                        totalSnapshotAttempts > 0
+                        ? 100.0f * float(netStats.snapshotPacketsDropped) / float(totalSnapshotAttempts)
+                        : 0.0f;
+
+                    ImGui::Text("Measured drop rate        : %.1f%%", measuredDropPercent);
+
+                    ImGui::Separator();
+
+                    ImGui::Text("Global commands sent      : %u", netStats.globalCommandsSent);
+                    ImGui::Text("Global commands received  : %u", netStats.globalCommandsReceived);
+
+                    ImGui::Separator();
+
+                    ImGui::Text("Delayed outgoing snapshots: %u", netStats.delayedOutgoingSnapshotPackets);
+                    ImGui::Text("Delayed incoming snapshots: %u", netStats.delayedIncomingSnapshotPackets);
+                }
+
                 ImGui::Separator();
 
                 ImGui::SeparatorText("Thread / Core Mapping");

@@ -3,7 +3,8 @@
 #include "NetProtocol.h"
 #include "NetPeer.h"
 #include "PeerConfig.h"
-
+#include <unordered_set>
+#include <deque>
 #include <vector>
 #include <deque>
 #include <atomic>
@@ -11,6 +12,20 @@
 
 namespace Net
 {
+    struct NetworkStats
+    {
+        uint32_t snapshotPacketsSent = 0;
+        uint32_t snapshotPacketsReceived = 0;
+        uint32_t snapshotPacketsDropped = 0;
+        uint32_t snapshotPacketsDelayed = 0;
+
+        uint32_t globalCommandsSent = 0;
+        uint32_t globalCommandsReceived = 0;
+
+        uint32_t delayedOutgoingSnapshotPackets = 0;
+        uint32_t delayedIncomingSnapshotPackets = 0;
+    };
+
     struct SnapshotImpairmentSettings
     {
         bool enabled = false;
@@ -24,13 +39,13 @@ namespace Net
     public:
         bool Init(const PeerConfig& cfg);
         void Shutdown();
-
+        NetworkStats GetStats() const;
         void Update(float dt);
 
         // ------------------------------------------------------------
         // Global commands (reliable)
         // ------------------------------------------------------------
-        void SendSceneChange(int sceneIndex);
+        void SendSceneChange(int sceneIndex, uint32_t sceneGeneration);
         void SendGravityEnabled(bool enabled);
 
         bool PopReceivedGlobalCommand(GlobalCommandPayload& out);
@@ -38,8 +53,11 @@ namespace Net
         // ------------------------------------------------------------
         // State snapshots (unreliable)
         // ------------------------------------------------------------
-        void SendStateSnapshot(uint32_t tick, const StateSnapshotItem* items, uint16_t count);
-
+        void SendStateSnapshot(
+            uint32_t tick,
+            uint32_t sceneGeneration,
+            const StateSnapshotItem* items,
+            uint32_t count);
         // Pops the latest received snapshot (single-slot mailbox).
         // Returns true if one was available.
         bool PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick);
@@ -52,6 +70,12 @@ namespace Net
 
         void SetSnapshotImpairment(const SnapshotImpairmentSettings& settings);
 
+        void ClearSnapshotBacklog();
+        void PauseSnapshotTraffic(float seconds);
+        void ClearSceneObjectTraffic();
+        void SetCurrentSceneGeneration(uint32_t generation);
+        uint32_t m_currentSceneGeneration = 1;
+
     private:
         void SendHello();
         void HandlePacket(const sockaddr_storage& from, const char* data, int size);
@@ -59,6 +83,7 @@ namespace Net
         void SendGlobalCommand(const GlobalCommandPayload& payload);
         bool ShouldDropSnapshotPacket() const;
         float SampleSnapshotDelaySeconds() const;
+        NetworkStats m_stats{};
 
     private:
         struct DelayedOutgoingSnapshot
@@ -87,10 +112,13 @@ namespace Net
         std::atomic<bool> m_hasPendingGlobal{ false };
         GlobalCommandPayload m_pendingGlobal{};
 
-        // ---- STATE_SNAPSHOT mailbox (latest only) ----
-        std::atomic<bool> m_hasPendingSnapshot{ false };
-        uint32_t m_pendingSnapshotTick = 0;
-        std::vector<StateSnapshotItem> m_pendingSnapshotItems;
+        struct ReceivedSnapshotChunk
+        {
+            uint32_t tick = 0;
+            std::vector<StateSnapshotItem> items;
+        };
+
+        std::deque<ReceivedSnapshotChunk> m_pendingSnapshotChunks;
 
         std::deque<SpawnObjectPayload> m_pendingSpawnObjects;
 
@@ -99,5 +127,12 @@ namespace Net
         mutable std::uniform_real_distribution<float> m_unitDist{ 0.0f, 1.0f };
         std::vector<DelayedOutgoingSnapshot> m_delayedOutgoingSnapshots;
         std::vector<DelayedIncomingSnapshot> m_delayedIncomingSnapshots;
+        float m_snapshotPauseSeconds = 0.0f;
+
+        // Used to send large snapshots over several network ticks instead of all at once.
+        uint32_t m_snapshotSendCursor = 0;
+
+        // Keep this small enough that control messages are never starved.
+        uint32_t m_maxSnapshotPacketsPerSend = 16;
     };
 }

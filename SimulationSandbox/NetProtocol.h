@@ -3,7 +3,7 @@
 
 namespace Net
 {
-    static constexpr uint32_t PROTOCOL_VERSION = 1;
+    static constexpr uint32_t PROTOCOL_VERSION = 3;
 
     enum class MsgType : uint8_t
     {
@@ -51,7 +51,14 @@ namespace Net
     struct StateSnapshotHeader
     {
         uint16_t count = 0;
+
+        uint16_t chunkIndex = 0;
+
+        uint16_t chunkCount = 1;
+
         uint16_t reserved = 0;
+
+        uint32_t sceneGeneration = 0;
     };
 
     struct StateSnapshotItem
@@ -74,6 +81,7 @@ namespace Net
     struct SpawnObjectPayload
     {
         uint32_t objectId = 0;
+        uint32_t sceneGeneration = 0;
         uint8_t ownerId = 0;      // 0..3 maps to ONE..FOUR
         uint8_t shapeType = 0;    // SpawnShapeType
         uint16_t reserved = 0;

@@ -28,7 +28,7 @@ public:
 
     void OnLoad  (World& world) override;
     void OnUnload(World& world) override;
-    void Update(World& world, float dt) override;
+    void Update(World& world, float dt, uint32_t currentSceneGeneration) override;
 
     void SetLocalPeerId(int peerId);
     bool PopPendingSpawn(Net::SpawnObjectPayload& outPayload);

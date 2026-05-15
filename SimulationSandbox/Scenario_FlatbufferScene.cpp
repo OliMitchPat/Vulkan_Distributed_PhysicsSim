@@ -807,12 +807,106 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 
     std::cout << "  Spawned " << objectCount << " object(s).\n";
 
+    // ------------------------------------------------------------
+    // Spawner runtime reset
+    //
+    // Important for networked scene switching:
+    // every time a scene is loaded, spawners must restart from a
+    // completely clean deterministic state. Otherwise one peer may
+    // continue with old spawn counters/timers and generate different
+    // spawned objects from the other peer.
+    // ------------------------------------------------------------
     m_spawnerRuntime.clear();
     m_pendingSpawnEvents.clear();
     m_spawnerElapsedSec = 0.0f;
 
-    if (scene->spawners() && scene->spawners_type())
-        m_spawnerRuntime.resize(scene->spawners()->size());
+    const auto* spawners = scene->spawners();
+    const auto* spawnerTypes = scene->spawners_type();
+
+    if (spawners && spawnerTypes)
+    {
+        const unsigned spawnerCount = spawners->size();
+        m_spawnerRuntime.resize(spawnerCount);
+
+        auto getBaseSpawner = [&](unsigned spawnerIndex) -> const Simulation::BaseSpawner*
+            {
+                if (!spawners || !spawnerTypes)
+                    return nullptr;
+
+                if (spawnerIndex >= spawners->size() ||
+                    spawnerIndex >= spawnerTypes->size())
+                {
+                    return nullptr;
+                }
+
+                const auto type = spawnerTypes->Get(spawnerIndex);
+
+                switch (type)
+                {
+                case Simulation::SpawnerType_SphereSpawner:
+                {
+                    const auto* sp =
+                        spawners->GetAs<Simulation::SphereSpawner>(spawnerIndex);
+                    return sp ? sp->base() : nullptr;
+                }
+
+                case Simulation::SpawnerType_CylinderSpawner:
+                {
+                    const auto* sp =
+                        spawners->GetAs<Simulation::CylinderSpawner>(spawnerIndex);
+                    return sp ? sp->base() : nullptr;
+                }
+
+                case Simulation::SpawnerType_CapsuleSpawner:
+                {
+                    const auto* sp =
+                        spawners->GetAs<Simulation::CapsuleSpawner>(spawnerIndex);
+                    return sp ? sp->base() : nullptr;
+                }
+
+                case Simulation::SpawnerType_CuboidSpawner:
+                {
+                    const auto* sp =
+                        spawners->GetAs<Simulation::CuboidSpawner>(spawnerIndex);
+                    return sp ? sp->base() : nullptr;
+                }
+
+                default:
+                    return nullptr;
+                }
+            };
+
+        for (unsigned i = 0; i < spawnerCount; ++i)
+        {
+            SpawnerRuntime& rt = m_spawnerRuntime[i];
+
+            rt.emittedCount = 0;
+            rt.spawnCounter = 0;
+            rt.burstDone = false;
+
+            const Simulation::BaseSpawner* base = getBaseSpawner(i);
+
+            if (base)
+            {
+                rt.nextSpawnTimeSec = std::max(0.0f, base->start_time());
+            }
+            else
+            {
+                rt.nextSpawnTimeSec = 0.0f;
+            }
+
+            std::cout << "[SpawnerReset] index=" << i
+                << " startTime=" << rt.nextSpawnTimeSec
+                << " emittedCount=" << rt.emittedCount
+                << " spawnCounter=" << rt.spawnCounter
+                << " burstDone=" << (rt.burstDone ? "true" : "false")
+                << "\n";
+        }
+    }
+    else
+    {
+        std::cout << "[SpawnerReset] no spawners in scene\n";
+    }
 }
 
 void Scenario_FlatbufferScene::SetLocalPeerId(int peerId)
@@ -929,7 +1023,7 @@ bool Scenario_FlatbufferScene::SpawnFromNetworkEvent(
     return true;
 }
 
-void Scenario_FlatbufferScene::Update(World& world, float dt)
+void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSceneGeneration)
 {
     if (!m_loader || !m_loader->IsLoaded())
         return;
@@ -1112,6 +1206,8 @@ void Scenario_FlatbufferScene::Update(World& world, float dt)
         for (int n = 0; n < spawnCountThisTick; ++n)
         {
             Net::SpawnObjectPayload payload{};
+
+            payload.sceneGeneration = currentSceneGeneration;
 
             Entity e = world.createEntity();
             payload.objectId = static_cast<uint32_t>(e);

@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cmath>
 
-
 namespace Net
 {
     // ============================================================
@@ -51,14 +50,63 @@ namespace Net
     static Peer* FindPeerById(std::vector<Peer>& peers, int peerId)
     {
         for (auto& p : peers)
+        {
             if (p.peerId == peerId)
                 return &p;
+        }
+
         return nullptr;
+    }
+
+    static bool PendingMessageIsType(const PendingMessage& msg, MsgType type)
+    {
+        if (msg.data.size() < sizeof(MsgHeader))
+            return false;
+
+        const MsgHeader* hdr =
+            reinterpret_cast<const MsgHeader*>(msg.data.data());
+
+        return (MsgType)hdr->msgType == type;
+    }
+
+    // ============================================================
+    // Reliable duplicate suppression
+    //
+    // Do NOT use lastReceivedSeq for duplicate suppression.
+    // UDP packets can arrive out of order, especially under latency/jitter.
+    // Track received reliable sequence numbers individually instead.
+    // ============================================================
+
+    static bool IsDuplicateReliable(Peer& peer, uint32_t seq)
+    {
+        if (seq == 0)
+            return false;
+
+        return peer.receivedReliableSeqs.find(seq) != peer.receivedReliableSeqs.end();
+    }
+
+    static void MarkReliableReceived(Peer& peer, uint32_t seq)
+    {
+        if (seq == 0)
+            return;
+
+        constexpr size_t MAX_TRACKED_RELIABLE_SEQS = 1024;
+
+        peer.receivedReliableSeqs.insert(seq);
+        peer.receivedReliableSeqOrder.push_back(seq);
+
+        while (peer.receivedReliableSeqOrder.size() > MAX_TRACKED_RELIABLE_SEQS)
+        {
+            const uint32_t oldSeq = peer.receivedReliableSeqOrder.front();
+            peer.receivedReliableSeqOrder.pop_front();
+            peer.receivedReliableSeqs.erase(oldSeq);
+        }
     }
 
     // ============================================================
     // ACK sender
     // ============================================================
+
     static void SendAck(UdpSocket& socket, Peer& peer, int localPeerId, uint32_t seq)
     {
         MsgHeader ack{};
@@ -70,25 +118,42 @@ namespace Net
     }
 
     // ============================================================
-    // Reliable send helper (enqueue for retransmit)
+    // Reliable send helper
+    //
+    // Reliable messages are sent immediately once, then stored for resend.
+    // High-priority reliable messages, such as scene changes, are placed
+    // at the front of the resend queue.
     // ============================================================
-    static void SendReliable(UdpSocket& socket, Peer& peer, const void* data, int size)
+
+    static void SendReliable(
+        UdpSocket& socket,
+        Peer& peer,
+        const void* data,
+        int size,
+        bool highPriority = false)
     {
+        // Always send immediately once.
         socket.Send(peer.addr, peer.addrLen, data, size);
 
         PendingMessage msg;
-        msg.data.assign(reinterpret_cast<const char*>(data),
+        msg.data.assign(
+            reinterpret_cast<const char*>(data),
             reinterpret_cast<const char*>(data) + size);
+
         msg.seq = reinterpret_cast<const MsgHeader*>(data)->seq;
         msg.timer = 0.0f;
         msg.retries = 0;
 
-        peer.resendQueue.push_back(std::move(msg));
+        if (highPriority)
+            peer.resendQueue.insert(peer.resendQueue.begin(), std::move(msg));
+        else
+            peer.resendQueue.push_back(std::move(msg));
     }
 
     // ============================================================
     // Init / Shutdown
     // ============================================================
+
     bool NetworkingSystem::Init(const PeerConfig& cfg)
     {
         std::string err;
@@ -101,6 +166,7 @@ namespace Net
         m_localPeerId = cfg.peer_id;
 
         m_peers.clear();
+
         for (const auto& p : cfg.RemotePeers())
         {
             if (p.peerId == cfg.peer_id)
@@ -119,7 +185,8 @@ namespace Net
             peer.peerId = p.peerId;
             peer.addr = addr;
             peer.addrLen = Net::SockaddrLen(addr);
-            m_peers.push_back(peer);
+
+            m_peers.push_back(std::move(peer));
         }
 
         SendHello();
@@ -132,8 +199,9 @@ namespace Net
     }
 
     // ============================================================
-    // Send HELLO (unreliable)
+    // Send HELLO
     // ============================================================
+
     void NetworkingSystem::SendHello()
     {
         MsgHeader msg{};
@@ -146,65 +214,40 @@ namespace Net
 
     // ============================================================
     // Update
+    //
+    // Important ordering:
+    // 1. Receive packets first so incoming GLOBAL_COMMAND messages are handled
+    //    before this peer spends time flushing snapshot traffic.
+    // 2. Resend reliable messages.
+    // 3. Deliver delayed outgoing snapshots with a budget.
+    //
+    // This keeps client 2 -> client 1 scene changes responsive even when
+    // client 1 owns many objects and is producing lots of snapshot traffic.
     // ============================================================
+
     void NetworkingSystem::Update(float dt)
     {
-        // ---- Deliver delayed outgoing snapshot packets ----
-        for (size_t i = 0; i < m_delayedOutgoingSnapshots.size();)
+        if (m_snapshotPauseSeconds > 0.0f)
         {
-            auto& p = m_delayedOutgoingSnapshots[i];
-            p.delaySec -= dt;
-            if (p.delaySec <= 0.0f)
-            {
-                m_socket.Send(p.addr, p.addrLen, p.payload.data(), (int)p.payload.size());
-                m_delayedOutgoingSnapshots.erase(m_delayedOutgoingSnapshots.begin() + (int)i);
-                continue;
-            }
-            ++i;
+            m_snapshotPauseSeconds = std::max(0.0f, m_snapshotPauseSeconds - dt);
         }
 
+        // ---- Receive loop first ----
         sockaddr_storage from{};
 
-        // ---- Receive loop ----
         int size = 0;
         while ((size = m_socket.Receive(from, m_recvBuffer, (int)sizeof(m_recvBuffer))) > 0)
         {
-            // Optional: lightweight debug for GLOBAL_COMMAND only
-            if (size >= (int)sizeof(MsgHeader))
-            {
-                const MsgHeader* h = reinterpret_cast<const MsgHeader*>(m_recvBuffer);
-                if (h->protocolVersion == PROTOCOL_VERSION &&
-                    (MsgType)h->msgType == MsgType::GLOBAL_COMMAND)
-                {
-                }
-            }
-
             HandlePacket(from, m_recvBuffer, size);
         }
 
-        // ---- Deliver delayed incoming snapshots to mailbox ----
-        for (size_t i = 0; i < m_delayedIncomingSnapshots.size();)
-        {
-            auto& p = m_delayedIncomingSnapshots[i];
-            p.delaySec -= dt;
-            if (p.delaySec <= 0.0f)
-            {
-                m_pendingSnapshotTick = p.tick;
-                m_pendingSnapshotItems = p.items;
-                m_hasPendingSnapshot.store(true, std::memory_order_release);
-                m_delayedIncomingSnapshots.erase(m_delayedIncomingSnapshots.begin() + (int)i);
-                continue;
-            }
-            ++i;
-        }
-
-        // ---- Resend logic (reliable queue) ----
+        // ---- Resend reliable messages ----
         constexpr float RESEND_INTERVAL_SEC = 0.05f;
         constexpr int   MAX_RETRIES = 10;
 
         for (auto& peer : m_peers)
         {
-            for (size_t i = 0; i < peer.resendQueue.size(); /* increment inside */)
+            for (size_t i = 0; i < peer.resendQueue.size();)
             {
                 auto& msg = peer.resendQueue[i];
                 msg.timer += dt;
@@ -213,12 +256,15 @@ namespace Net
                 {
                     if (msg.retries >= MAX_RETRIES)
                     {
-                        peer.resendQueue.erase(peer.resendQueue.begin() + i);
+                        peer.resendQueue.erase(peer.resendQueue.begin() + (int)i);
                         continue;
                     }
 
-                    m_socket.Send(peer.addr, peer.addrLen,
-                        msg.data.data(), (int)msg.data.size());
+                    m_socket.Send(
+                        peer.addr,
+                        peer.addrLen,
+                        msg.data.data(),
+                        (int)msg.data.size());
 
                     msg.timer = 0.0f;
                     msg.retries++;
@@ -227,11 +273,78 @@ namespace Net
                 ++i;
             }
         }
+
+        // ---- Deliver delayed outgoing snapshot packets ----
+        //
+        // Snapshots are low priority. During scene/global transitions, discard
+        // queued snapshots because they are either stale or not worth delaying
+        // control traffic for.
+        if (m_snapshotPauseSeconds > 0.0f)
+        {
+            m_delayedOutgoingSnapshots.clear();
+        }
+        else
+        {
+            constexpr int MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE = 32;
+            int sentThisUpdate = 0;
+
+            for (size_t i = 0; i < m_delayedOutgoingSnapshots.size();)
+            {
+                auto& p = m_delayedOutgoingSnapshots[i];
+                p.delaySec -= dt;
+
+                if (p.delaySec <= 0.0f)
+                {
+                    m_socket.Send(
+                        p.addr,
+                        p.addrLen,
+                        p.payload.data(),
+                        (int)p.payload.size());
+
+                    m_delayedOutgoingSnapshots.erase(
+                        m_delayedOutgoingSnapshots.begin() + (int)i);
+
+                    ++sentThisUpdate;
+
+                    if (sentThisUpdate >= MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE)
+                        break;
+
+                    continue;
+                }
+
+                ++i;
+            }
+        }
+
+        // If you no longer use delayed incoming snapshots because impairment is
+        // outgoing-only, this vector should normally remain empty. Keep this
+        // small delivery path for safety/backwards compatibility.
+        for (size_t i = 0; i < m_delayedIncomingSnapshots.size();)
+        {
+            auto& p = m_delayedIncomingSnapshots[i];
+            p.delaySec -= dt;
+
+            if (p.delaySec <= 0.0f)
+            {
+                ReceivedSnapshotChunk chunk{};
+                chunk.tick = p.tick;
+                chunk.items = std::move(p.items);
+
+                m_pendingSnapshotChunks.push_back(std::move(chunk));
+                m_delayedIncomingSnapshots.erase(
+                    m_delayedIncomingSnapshots.begin() + (int)i);
+
+                continue;
+            }
+
+            ++i;
+        }
     }
 
     // ============================================================
     // Handle incoming packet
     // ============================================================
+
     void NetworkingSystem::HandlePacket(const sockaddr_storage& from, const char* data, int size)
     {
         if (size < (int)sizeof(MsgHeader))
@@ -249,14 +362,13 @@ namespace Net
         if (!peer)
         {
             peer = FindPeerById(m_peers, (int)hdr->peerId);
-            if (!peer) return;
+            if (!peer)
+                return;
 
-            // Learn sender endpoint (so future ACKs/resends go to the right place)
+            // Learn sender endpoint so future ACKs/resends go to the right place.
             peer->addr = from;
             peer->addrLen = Net::SockaddrLen(from);
         }
-        // Safety: ensure the endpoint-mapped peer id matches the header.
-        // Prevents accidentally clearing a wrong peer's resend queue.
 
         switch ((MsgType)hdr->msgType)
         {
@@ -284,97 +396,152 @@ namespace Net
             const uint32_t ackSeq = hdr->ack;
 
             auto& queue = peer->resendQueue;
-            const size_t before = queue.size();
 
             queue.erase(
-                std::remove_if(queue.begin(), queue.end(),
-                    [&](const PendingMessage& m) { return m.seq == ackSeq; }),
+                std::remove_if(
+                    queue.begin(),
+                    queue.end(),
+                    [&](const PendingMessage& m)
+                    {
+                        return m.seq == ackSeq;
+                    }),
                 queue.end());
-
-            const size_t after = queue.size();
 
             break;
         }
+
         case MsgType::GLOBAL_COMMAND:
         {
-            // Always ACK reliable messages (even duplicates)
+            // Reliable channel: always ACK, including duplicates.
             SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
-
-            // Duplicate suppression
-            if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)
-                break;
-
-            peer->lastReceivedSeq = hdr->seq;
 
             if (size < (int)sizeof(MsgHeader) + (int)sizeof(GlobalCommandPayload))
                 break;
 
-            const GlobalCommandPayload* payload =
-                reinterpret_cast<const GlobalCommandPayload*>(data + sizeof(MsgHeader));
+            // Duplicate suppression without assuming in-order UDP delivery.
+            if (IsDuplicateReliable(*peer, hdr->seq))
+                break;
 
-            // Store latest for PopReceivedGlobalCommand()
+            MarkReliableReceived(*peer, hdr->seq);
+
+            ++m_stats.globalCommandsReceived;
+
+            const GlobalCommandPayload* payload =
+                reinterpret_cast<const GlobalCommandPayload*>(
+                    data + sizeof(MsgHeader));
+
+            const auto commandType =
+                (GlobalCommandType)payload->commandType;
+
+            if (commandType == GlobalCommandType::SceneChange)
+            {
+                // A scene change invalidates all object traffic from the old scene.
+                ClearSceneObjectTraffic();
+                PauseSnapshotTraffic(0.25f);
+
+                // Important:
+                // m_currentSceneGeneration is set here so packets from the new scene
+                // can be accepted by the networking layer as soon as this command arrives.
+                //
+                // The main shared sceneGeneration should also be updated from this payload
+                // wherever you process PopReceivedGlobalCommand().
+                m_currentSceneGeneration = payload->sceneGeneration;
+            }
+            else if (commandType == GlobalCommandType::GravityOnOff)
+            {
+                PauseSnapshotTraffic(0.10f);
+            }
+
+            // Store latest command for PopReceivedGlobalCommand().
             m_pendingGlobal = *payload;
             m_hasPendingGlobal.store(true, std::memory_order_release);
+
             break;
         }
 
         case MsgType::STATE_SNAPSHOT:
         {
-            if (ShouldDropSnapshotPacket())
+            // Snapshots are low-priority and disposable.
+            // During scene/global transitions, old snapshots are stale.
+            if (m_snapshotPauseSeconds > 0.0f)
+            {
+                ++m_stats.snapshotPacketsDropped;
                 break;
+            }
 
             if (size < (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader)))
                 break;
 
             const StateSnapshotHeader* sh =
-                reinterpret_cast<const StateSnapshotHeader*>(data + sizeof(MsgHeader));
+                reinterpret_cast<const StateSnapshotHeader*>(
+                    data + sizeof(MsgHeader));
+
+            // Drop snapshots from the wrong scene instance.
+            // This prevents old-scene snapshots from corrupting the current scene.
+            if (sh->sceneGeneration != m_currentSceneGeneration)
+            {
+                ++m_stats.snapshotPacketsDropped;
+                break;
+            }
 
             const int count = (int)sh->count;
-            const int expectedSize =
-                (int)(sizeof(MsgHeader) + sizeof(StateSnapshotHeader) + count * sizeof(StateSnapshotItem));
 
-            if (count < 0 || expectedSize > size)
+            if (count <= 0)
                 break;
 
-            const StateSnapshotItem* items =
-                reinterpret_cast<const StateSnapshotItem*>(data + sizeof(MsgHeader) + sizeof(StateSnapshotHeader));
+            const int expectedSize =
+                (int)sizeof(MsgHeader) +
+                (int)sizeof(StateSnapshotHeader) +
+                count * (int)sizeof(StateSnapshotItem);
 
-            const float delaySec = SampleSnapshotDelaySeconds();
-            if (delaySec > 0.0f)
-            {
-                DelayedIncomingSnapshot delayed{};
-                delayed.tick = hdr->tick;
-                delayed.items.assign(items, items + count);
-                delayed.delaySec = delaySec;
-                m_delayedIncomingSnapshots.push_back(std::move(delayed));
-            }
-            else
-            {
-                m_pendingSnapshotTick = hdr->tick;
-                m_pendingSnapshotItems.assign(items, items + count);
-                m_hasPendingSnapshot.store(true, std::memory_order_release);
-            }
+            if (expectedSize > size)
+                break;
+
+            ++m_stats.snapshotPacketsReceived;
+
+            const StateSnapshotItem* items =
+                reinterpret_cast<const StateSnapshotItem*>(
+                    data + sizeof(MsgHeader) + sizeof(StateSnapshotHeader));
+
+            // Do NOT apply artificial latency/drop here.
+            // Impairment is outgoing-only in SendStateSnapshot().
+            ReceivedSnapshotChunk chunk{};
+            chunk.tick = hdr->tick;
+            chunk.items.assign(items, items + count);
+
+            m_pendingSnapshotChunks.push_back(std::move(chunk));
+
             break;
         }
 
         case MsgType::SPAWN_OBJECT:
         {
-            // Reliable channel
+            // Reliable channel: always ACK, including duplicates.
             SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
-
-            // Duplicate suppression
-            if (hdr->seq != 0 && hdr->seq <= peer->lastReceivedSeq)
-                break;
-
-            peer->lastReceivedSeq = hdr->seq;
 
             if (size < (int)sizeof(MsgHeader) + (int)sizeof(SpawnObjectPayload))
                 break;
 
+            // Duplicate suppression without assuming in-order UDP delivery.
+            if (IsDuplicateReliable(*peer, hdr->seq))
+                break;
+
+            MarkReliableReceived(*peer, hdr->seq);
+
             const SpawnObjectPayload* payload =
-                reinterpret_cast<const SpawnObjectPayload*>(data + sizeof(MsgHeader));
+                reinterpret_cast<const SpawnObjectPayload*>(
+                    data + sizeof(MsgHeader));
+
+            // Drop spawns from the wrong scene instance.
+            // ACK has already been sent, so the sender stops resending it,
+            // but this peer will not apply stale object creation.
+            if (payload->sceneGeneration != m_currentSceneGeneration)
+            {
+                break;
+            }
 
             m_pendingSpawnObjects.push_back(*payload);
+
             break;
         }
 
@@ -384,21 +551,43 @@ namespace Net
     }
 
     // ============================================================
-    // GLOBAL_COMMAND sending (reliable)
+    // GLOBAL_COMMAND sending
     // ============================================================
-    void NetworkingSystem::SendSceneChange(int sceneIndex)
+    void NetworkingSystem::SetCurrentSceneGeneration(uint32_t generation)
     {
+        m_currentSceneGeneration = generation;
+    }
+
+
+    void NetworkingSystem::SendSceneChange(int sceneIndex, uint32_t sceneGeneration)
+    {
+        ClearSceneObjectTraffic();
+        PauseSnapshotTraffic(0.25f);
+
+        // Local networking layer should immediately treat the new scene generation
+        // as current, so it does not send/accept old-scene object traffic.
+        m_currentSceneGeneration = sceneGeneration;
+
         GlobalCommandPayload p{};
         p.commandType = (uint8_t)GlobalCommandType::SceneChange;
         p.sceneIndex = sceneIndex;
+        p.sceneGeneration = sceneGeneration;
+
+        SendGlobalCommand(p);
+        SendGlobalCommand(p);
         SendGlobalCommand(p);
     }
 
     void NetworkingSystem::SendGravityEnabled(bool enabled)
     {
+        PauseSnapshotTraffic(0.10f);
+
         GlobalCommandPayload p{};
         p.commandType = (uint8_t)GlobalCommandType::GravityOnOff;
         p.gravityEnabled = enabled ? 1 : 0;
+
+        // Redundant send is cheap and makes the global UI feel immediate.
+        SendGlobalCommand(p);
         SendGlobalCommand(p);
     }
 
@@ -424,9 +613,20 @@ namespace Net
             std::memcpy(buffer, &hdr, sizeof(hdr));
             std::memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
 
-            SendReliable(m_socket, peer, buffer, (int)(sizeof(hdr) + sizeof(payload)));
+            SendReliable(
+                m_socket,
+                peer,
+                buffer,
+                (int)(sizeof(hdr) + sizeof(payload)),
+                true);
+
+            ++m_stats.globalCommandsSent;
         }
     }
+
+    // ============================================================
+    // SPAWN_OBJECT sending / receiving
+    // ============================================================
 
     void NetworkingSystem::SendSpawnObject(const SpawnObjectPayload& payload)
     {
@@ -441,7 +641,12 @@ namespace Net
             std::memcpy(buffer, &hdr, sizeof(hdr));
             std::memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
 
-            SendReliable(m_socket, peer, buffer, (int)(sizeof(hdr) + sizeof(payload)));
+            SendReliable(
+                m_socket,
+                peer,
+                buffer,
+                (int)(sizeof(hdr) + sizeof(payload)),
+                false);
         }
     }
 
@@ -452,80 +657,194 @@ namespace Net
 
         out = m_pendingSpawnObjects.front();
         m_pendingSpawnObjects.pop_front();
+
         return true;
     }
 
     // ============================================================
-    // STATE_SNAPSHOT sending (unreliable)
+    // STATE_SNAPSHOT receiving
     // ============================================================
-    void NetworkingSystem::SendStateSnapshot(uint32_t tick, const StateSnapshotItem* items, uint16_t count)
+
+    bool NetworkingSystem::PopReceivedStateSnapshot(
+        std::vector<StateSnapshotItem>& outItems,
+        uint32_t& outTick)
+    {
+        if (m_pendingSnapshotChunks.empty())
+            return false;
+
+        ReceivedSnapshotChunk chunk = std::move(m_pendingSnapshotChunks.front());
+        m_pendingSnapshotChunks.pop_front();
+
+        outTick = chunk.tick;
+        outItems = std::move(chunk.items);
+
+        return true;
+    }
+
+    // ============================================================
+    // Network stats
+    // ============================================================
+
+    Net::NetworkStats NetworkingSystem::GetStats() const
+    {
+        NetworkStats stats = m_stats;
+
+        stats.delayedOutgoingSnapshotPackets =
+            static_cast<uint32_t>(m_delayedOutgoingSnapshots.size());
+
+        stats.delayedIncomingSnapshotPackets =
+            static_cast<uint32_t>(m_delayedIncomingSnapshots.size());
+
+        return stats;
+    }
+
+    // ============================================================
+    // STATE_SNAPSHOT sending
+    //
+    // Snapshots are unreliable, low-priority, chunked, and budgeted.
+    // ============================================================
+
+    void NetworkingSystem::SendStateSnapshot(
+        uint32_t tick,
+        uint32_t sceneGeneration,
+        const StateSnapshotItem* items,
+        uint32_t count)
     {
         if (!items || count == 0)
             return;
 
-        const int bytes =
-            (int)sizeof(MsgHeader) +
-            (int)sizeof(StateSnapshotHeader) +
-            (int)count * (int)sizeof(StateSnapshotItem);
+        // Snapshots are low priority. During scene/global transitions, skip them.
+        if (m_snapshotPauseSeconds > 0.0f)
+            return;
 
-        if (bytes > (int)sizeof(m_recvBuffer))
+        // Conservative UDP payload size to avoid fragmentation.
+        static constexpr int SAFE_UDP_PACKET_BYTES = 1200;
+
+        const int headerBytes =
+            (int)sizeof(MsgHeader) +
+            (int)sizeof(StateSnapshotHeader);
+
+        const int maxItemsPerPacket =
+            (SAFE_UDP_PACKET_BYTES - headerBytes) /
+            (int)sizeof(StateSnapshotItem);
+
+        if (maxItemsPerPacket <= 0)
         {
-            std::cout << "[NET] STATE_SNAPSHOT too large: " << bytes << " bytes (count=" << count << ")\n";
+            std::cout << "[NET] STATE_SNAPSHOT item too large for packet\n";
             return;
         }
 
-        char buffer[1500];
+        const uint32_t totalChunks =
+            (count + (uint32_t)maxItemsPerPacket - 1u) /
+            (uint32_t)maxItemsPerPacket;
 
-        MsgHeader hdr{};
-        hdr.msgType = (uint8_t)MsgType::STATE_SNAPSHOT;
-        hdr.peerId = (uint8_t)m_localPeerId;
-        hdr.tick = tick;
+        if (totalChunks == 0)
+            return;
 
-        StateSnapshotHeader sh{};
-        sh.count = count;
-
-        std::memcpy(buffer, &hdr, sizeof(hdr));
-        std::memcpy(buffer + sizeof(hdr), &sh, sizeof(sh));
-        std::memcpy(buffer + sizeof(hdr) + sizeof(sh), items, count * sizeof(StateSnapshotItem));
-
-        for (auto& peer : m_peers)
+        if (totalChunks > UINT16_MAX)
         {
-            if (ShouldDropSnapshotPacket())
+            std::cout << "[NET] STATE_SNAPSHOT too many chunks: "
+                << totalChunks
+                << " for count="
+                << count
+                << "\n";
+            return;
+        }
+
+        // Do not send the whole snapshot if it is huge.
+        // Send a rotating window so reliable control traffic stays responsive.
+        const uint32_t chunksToSend =
+            std::min<uint32_t>(totalChunks, m_maxSnapshotPacketsPerSend);
+
+        char buffer[SAFE_UDP_PACKET_BYTES];
+
+        for (uint32_t sent = 0; sent < chunksToSend; ++sent)
+        {
+            const uint32_t chunkIndex =
+                (m_snapshotSendCursor + sent) % totalChunks;
+
+            const uint32_t firstItem =
+                chunkIndex * (uint32_t)maxItemsPerPacket;
+
+            const uint32_t remaining = count - firstItem;
+
+            const uint32_t itemsInChunk =
+                std::min<uint32_t>(
+                    remaining,
+                    (uint32_t)maxItemsPerPacket);
+
+            if (itemsInChunk == 0)
                 continue;
 
-            const float delaySec = SampleSnapshotDelaySeconds();
-            if (delaySec > 0.0f)
+            const int bytes =
+                headerBytes +
+                (int)itemsInChunk * (int)sizeof(StateSnapshotItem);
+
+            MsgHeader hdr{};
+            hdr.msgType = (uint8_t)MsgType::STATE_SNAPSHOT;
+            hdr.peerId = (uint8_t)m_localPeerId;
+            hdr.tick = tick;
+
+            StateSnapshotHeader sh{};
+            sh.count = (uint16_t)itemsInChunk;
+            sh.chunkIndex = (uint16_t)chunkIndex;
+            sh.chunkCount = (uint16_t)totalChunks;
+            sh.sceneGeneration = sceneGeneration;
+
+            std::memcpy(buffer, &hdr, sizeof(hdr));
+            std::memcpy(buffer + sizeof(hdr), &sh, sizeof(sh));
+            std::memcpy(
+                buffer + sizeof(hdr) + sizeof(sh),
+                items + firstItem,
+                itemsInChunk * sizeof(StateSnapshotItem));
+
+            for (auto& peer : m_peers)
             {
-                DelayedOutgoingSnapshot delayed{};
-                delayed.addr = peer.addr;
-                delayed.addrLen = peer.addrLen;
-                delayed.payload.assign(buffer, buffer + bytes);
-                delayed.delaySec = delaySec;
-                m_delayedOutgoingSnapshots.push_back(std::move(delayed));
-            }
-            else
-            {
-                m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
+                if (ShouldDropSnapshotPacket())
+                {
+                    ++m_stats.snapshotPacketsDropped;
+                    continue;
+                }
+
+                const float delaySec = SampleSnapshotDelaySeconds();
+
+                if (delaySec > 0.0f)
+                {
+                    DelayedOutgoingSnapshot delayed{};
+                    delayed.addr = peer.addr;
+                    delayed.addrLen = peer.addrLen;
+                    delayed.payload.assign(buffer, buffer + bytes);
+                    delayed.delaySec = delaySec;
+
+                    m_delayedOutgoingSnapshots.push_back(std::move(delayed));
+
+                    ++m_stats.snapshotPacketsDelayed;
+                }
+                else
+                {
+                    m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
+                }
+
+                ++m_stats.snapshotPacketsSent;
             }
         }
+
+        m_snapshotSendCursor =
+            (m_snapshotSendCursor + chunksToSend) % totalChunks;
     }
 
-    bool NetworkingSystem::PopReceivedStateSnapshot(std::vector<StateSnapshotItem>& outItems, uint32_t& outTick)
-    {
-        if (!m_hasPendingSnapshot.exchange(false, std::memory_order_acq_rel))
-            return false;
+    // ============================================================
+    // Snapshot impairment
+    // ============================================================
 
-        outTick = m_pendingSnapshotTick;
-        outItems = m_pendingSnapshotItems;
-        return true;
-    }
-
-    void NetworkingSystem::SetSnapshotImpairment(const SnapshotImpairmentSettings& settings)
+    void NetworkingSystem::SetSnapshotImpairment(
+        const SnapshotImpairmentSettings& settings)
     {
         m_snapshotImpairment.enabled = settings.enabled;
         m_snapshotImpairment.latencyMs = std::max(0.0f, settings.latencyMs);
         m_snapshotImpairment.jitterMs = std::max(0.0f, settings.jitterMs);
-        m_snapshotImpairment.dropPercent = std::max(0.0f, std::min(settings.dropPercent, 100.0f));
+        m_snapshotImpairment.dropPercent =
+            std::max(0.0f, std::min(settings.dropPercent, 100.0f));
     }
 
     bool NetworkingSystem::ShouldDropSnapshotPacket() const
@@ -547,13 +866,17 @@ namespace Net
 
         const float latencyMs = m_snapshotImpairment.latencyMs;
         const float jitterMs = m_snapshotImpairment.jitterMs;
+
         if (latencyMs <= 0.0f && jitterMs <= 0.0f)
             return 0.0f;
 
         float delayMs = latencyMs;
+
         if (jitterMs > 0.0f)
         {
-            const float jitter = (m_unitDist(m_rng) * 2.0f - 1.0f) * jitterMs;
+            const float jitter =
+                (m_unitDist(m_rng) * 2.0f - 1.0f) * jitterMs;
+
             delayMs += jitter;
         }
 
@@ -561,4 +884,44 @@ namespace Net
         return delayMs * 0.001f;
     }
 
+    // ============================================================
+    // Snapshot priority control
+    // ============================================================
+
+    void NetworkingSystem::ClearSnapshotBacklog()
+    {
+        m_delayedOutgoingSnapshots.clear();
+        m_delayedIncomingSnapshots.clear();
+        m_pendingSnapshotChunks.clear();
+
+        m_snapshotSendCursor = 0;
+    }
+
+    void NetworkingSystem::PauseSnapshotTraffic(float seconds)
+    {
+        m_snapshotPauseSeconds =
+            std::max(m_snapshotPauseSeconds, seconds);
+    }
+
+    void NetworkingSystem::ClearSceneObjectTraffic()
+    {
+        ClearSnapshotBacklog();
+
+        m_pendingSpawnObjects.clear();
+
+        for (auto& peer : m_peers)
+        {
+            auto& q = peer.resendQueue;
+
+            q.erase(
+                std::remove_if(
+                    q.begin(),
+                    q.end(),
+                    [](const PendingMessage& msg)
+                    {
+                        return PendingMessageIsType(msg, MsgType::SPAWN_OBJECT);
+                    }),
+                q.end());
+        }
+    }
 }

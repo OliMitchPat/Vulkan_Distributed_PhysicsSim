@@ -37,6 +37,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <cmath>
+#include <limits>
 
 // ---- Fallback material constants ----------------------------------------
 namespace
@@ -492,6 +493,7 @@ void Scenario_FlatbufferScene::OnUnload(World& /*world*/)
     m_spawnerRuntime.clear();
     m_pendingSpawnEvents.clear();
     m_spawnerElapsedSec = 0.0f;
+    m_nextSpawnerWakeSec = 0.0f;
 }
 
 void Scenario_FlatbufferScene::OnLoad(World& world)
@@ -527,6 +529,60 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
         sun.intensity = 2.0f;
 
         world.addComponent(lightE, sun);
+    }
+
+    const auto* cameras = scene->cameras();
+    if (cameras && cameras->size() > 0)
+    {
+        for (unsigned i = 0; i < cameras->size(); ++i)
+        {
+            const Simulation::Camera* fbCam = cameras->Get(i);
+            if (!fbCam)
+                continue;
+
+            std::string camName = SimIO::ToStdStringOrEmpty(fbCam->name());
+            if (camName.empty())
+                camName = "camera " + std::to_string(i + 1);
+
+            const Simulation::Transform* fbTransform = fbCam->transform();
+            const glm::vec3 pos = SimIO::ToPosition(fbTransform);
+            const glm::quat ori = SimIO::ToOrientationQuat(fbTransform);
+
+            Entity camE = world.createEntity();
+            world.addComponent(camE, NameComponent{ camName });
+
+            TransformComponent tr{};
+            tr.position = pos;
+            tr.rotation = glm::eulerAngles(ori);
+            tr.orientation = ori;
+            tr.scale = glm::vec3(1.0f);
+            world.addComponent(camE, tr);
+
+            CameraComponent cam{};
+            if (const auto* persp = fbCam->camera_type_as_PerspectiveCamera())
+            {
+                cam.projection = CameraComponent::Projection::Perspective;
+                cam.fov = persp->fov() > 0.0f ? persp->fov() : 60.0f;
+                cam.nearClip = persp->near() > 0.0f ? persp->near() : 0.1f;
+                cam.farClip = persp->far() > cam.nearClip ? persp->far() : 250.0f;
+            }
+            else if (const auto* ortho = fbCam->camera_type_as_OrthographicCamera())
+            {
+                cam.projection = CameraComponent::Projection::Orthographic;
+                cam.orthoSize = ortho->size() > 0.0f ? ortho->size() : 10.0f;
+                cam.nearClip = ortho->near() > 0.0f ? ortho->near() : 0.1f;
+                cam.farClip = ortho->far() > cam.nearClip ? ortho->far() : 250.0f;
+            }
+            else
+            {
+                cam.projection = CameraComponent::Projection::Perspective;
+                cam.fov = 60.0f;
+                cam.nearClip = 0.1f;
+                cam.farClip = 250.0f;
+            }
+
+            world.addComponent(camE, cam);
+        }
     }
 
     const unsigned objectCount = scene->objects() ? scene->objects()->size() : 0;
@@ -652,6 +708,7 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
             TransformComponent tr{};
             tr.position = pos;
             tr.rotation = glm::eulerAngles(ori);
+            tr.orientation = ori;
             tr.scale = glm::vec3(uniformScale);
             world.addComponent(e, tr);
         }
@@ -819,6 +876,7 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
     m_spawnerRuntime.clear();
     m_pendingSpawnEvents.clear();
     m_spawnerElapsedSec = 0.0f;
+    m_nextSpawnerWakeSec = 0.0f;
 
     const auto* spawners = scene->spawners();
     const auto* spawnerTypes = scene->spawners_type();
@@ -965,6 +1023,7 @@ bool Scenario_FlatbufferScene::SpawnFromNetworkEvent(
 
     const glm::quat q = QuatFromNet(payload.rot);
     tr.rotation = glm::eulerAngles(q);
+    tr.orientation = q;
     tr.scale = glm::vec3(1.0f);
     world.addComponent(e, tr);
 
@@ -1083,6 +1142,9 @@ void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSc
         return;
 
     m_spawnerElapsedSec += std::max(0.0f, dt);
+    if (m_spawnerElapsedSec + 1e-5f < m_nextSpawnerWakeSec)
+        return;
+    float nextWakeSec = std::numeric_limits<float>::max();
 
     const auto* spawners = scene->spawners();
     const auto* types = scene->spawners_type();
@@ -1167,7 +1229,10 @@ void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSc
 
         const float startTime = std::max(0.0f, base->start_time());
         if (m_spawnerElapsedSec < startTime)
+        {
+            nextWakeSec = std::min(nextWakeSec, startTime);
             continue;
+        }
 
         const auto* burst = base->spawn_type_as_SingleBurstSpawn();
         const auto* repeating = base->spawn_type_as_RepeatingSpawn();
@@ -1196,11 +1261,20 @@ void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSc
             if (rt.nextSpawnTimeSec <= 0.0f)
                 rt.nextSpawnTimeSec = startTime;
 
+            if (m_spawnerElapsedSec < rt.nextSpawnTimeSec)
+            {
+                nextWakeSec = std::min(nextWakeSec, rt.nextSpawnTimeSec);
+                continue;
+            }
+
             while (rt.emittedCount < maxCount && m_spawnerElapsedSec >= rt.nextSpawnTimeSec)
             {
                 ++spawnCountThisTick;
                 rt.nextSpawnTimeSec += interval;
             }
+
+            if (rt.emittedCount + static_cast<uint32_t>(spawnCountThisTick) < maxCount)
+                nextWakeSec = std::min(nextWakeSec, rt.nextSpawnTimeSec);
         }
 
         for (int n = 0; n < spawnCountThisTick; ++n)
@@ -1315,4 +1389,9 @@ void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSc
             ++rt.emittedCount;
         }
     }
+
+    m_nextSpawnerWakeSec =
+        nextWakeSec == std::numeric_limits<float>::max()
+        ? std::numeric_limits<float>::max()
+        : nextWakeSec;
 }

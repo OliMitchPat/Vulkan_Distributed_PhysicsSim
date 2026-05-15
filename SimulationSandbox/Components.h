@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <string>
 #include <vector>
 #include "World.h"
@@ -178,6 +179,7 @@ struct TransformComponent
 {
     glm::vec3 position{ 0.0f };
     glm::vec3 rotation{ 0.0f }; // Euler angles in radians (pitch, yaw, roll)
+    glm::quat orientation{ 1.0f, 0.0f, 0.0f, 0.0f };
     glm::vec3 scale{ 1.0f };
 
     TransformComponent() = default;
@@ -285,7 +287,15 @@ struct MaterialComponent
 //
 struct CameraComponent
 {
+    enum class Projection
+    {
+        Perspective,
+        Orthographic
+    };
+
+    Projection projection = Projection::Perspective;
     float fov = 60.0f;      // degrees, will be converted to radians
+    float orthoSize = 10.0f;
     float nearClip = 0.1f;
     float farClip = 250.0f;
 

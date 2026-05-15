@@ -52,6 +52,8 @@
 #include <unordered_map>
 #include <vector>
 #include <iostream>
+#include <sstream>
+#include <limits>
 
 #include "NetworkingSystem.h"
 #include "Components.h" // OwnerComponent
@@ -126,6 +128,124 @@ static double NowSeconds()
     return std::chrono::duration<double>(now).count();
 }
 
+struct RateCounter
+{
+    double windowStartSec = 0.0;
+    uint32_t count = 0;
+
+    float Add(uint32_t amount, double nowSec)
+    {
+        if (windowStartSec <= 0.0)
+        {
+            windowStartSec = nowSec;
+            count = 0;
+            return -1.0f;
+        }
+
+        count += amount;
+        const double elapsed = nowSec - windowStartSec;
+        if (elapsed < 0.5)
+            return -1.0f;
+
+        const float hz = elapsed > 0.0
+            ? static_cast<float>(static_cast<double>(count) / elapsed)
+            : 0.0f;
+
+        windowStartSec = nowSec;
+        count = 0;
+        return hz;
+    }
+};
+
+struct SimTimingStats
+{
+    float simLoopMsAvg = 0.0f;
+    float simLoopMsMax = 0.0f;
+    float scenarioMsAvg = 0.0f;
+    float scenarioMsMax = 0.0f;
+    float physicsMsAvg = 0.0f;
+    float physicsMsMax = 0.0f;
+    float collisionMsAvg = 0.0f;
+    float collisionMsMax = 0.0f;
+    float netStateMsAvg = 0.0f;
+    float netStateMsMax = 0.0f;
+    float renderSnapshotMsAvg = 0.0f;
+    float renderSnapshotMsMax = 0.0f;
+    float lockMsAvg = 0.0f;
+    float lockMsMax = 0.0f;
+};
+
+struct TimingSeries
+{
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+    uint32_t samples = 0;
+
+    void Add(double ms)
+    {
+        totalMs += ms;
+        maxMs = std::max(maxMs, ms);
+        ++samples;
+    }
+
+    float Avg() const
+    {
+        return samples > 0
+            ? static_cast<float>(totalMs / static_cast<double>(samples))
+            : 0.0f;
+    }
+
+    float Max() const
+    {
+        return static_cast<float>(maxMs);
+    }
+};
+
+struct TimingAccumulator
+{
+    TimingSeries simLoop;
+    TimingSeries scenario;
+    TimingSeries physics;
+    TimingSeries collision;
+    TimingSeries netState;
+    TimingSeries renderSnapshot;
+    TimingSeries lock;
+    double windowStartSec = 0.0;
+
+    static double Ms(double startSec, double endSec)
+    {
+        return (endSec - startSec) * 1000.0;
+    }
+
+    bool PublishIfReady(double nowSec, SimTimingStats& out)
+    {
+        if (windowStartSec <= 0.0)
+            windowStartSec = nowSec;
+
+        if ((nowSec - windowStartSec) < 0.5)
+            return false;
+
+        out.simLoopMsAvg = simLoop.Avg();
+        out.simLoopMsMax = simLoop.Max();
+        out.scenarioMsAvg = scenario.Avg();
+        out.scenarioMsMax = scenario.Max();
+        out.physicsMsAvg = physics.Avg();
+        out.physicsMsMax = physics.Max();
+        out.collisionMsAvg = collision.Avg();
+        out.collisionMsMax = collision.Max();
+        out.netStateMsAvg = netState.Avg();
+        out.netStateMsMax = netState.Max();
+        out.renderSnapshotMsAvg = renderSnapshot.Avg();
+        out.renderSnapshotMsMax = renderSnapshot.Max();
+        out.lockMsAvg = lock.Avg();
+        out.lockMsMax = lock.Max();
+
+        *this = TimingAccumulator{};
+        windowStartSec = nowSec;
+        return true;
+    }
+};
+
 static glm::quat IntegrateOrientation(const glm::quat& rot, const glm::vec3& angVel, float dt)
 {
     const float speed = glm::length(angVel);
@@ -193,6 +313,18 @@ static bool SampleReplicaStateAtTime(const ReplicaSnapshotRing& ring,
     return true;
 }
 
+struct RuntimeDebugCounts
+{
+    uint32_t localOwned = 0;
+    uint32_t remoteOwned = 0;
+    uint32_t staticObjects = 0;
+    uint32_t animatedObjects = 0;
+    uint32_t spawnedObjects = 0;
+    uint32_t dynamicBodies = 0;
+    uint32_t collisionCandidates = 0;
+    uint32_t collisionContacts = 0;
+};
+
 // ============================================================================
 // Shared control state between threads
 // ============================================================================
@@ -251,13 +383,26 @@ struct SimSharedState
     // Measured Hz — written by each thread, read by UI
     std::atomic<float> measuredRenderHz{ 0.0f };
     std::atomic<float> measuredNetworkHz{ 0.0f };
+    std::atomic<float> measuredNetworkSendHz{ 0.0f };
+    std::atomic<float> measuredNetworkRecvHz{ 0.0f };
     std::atomic<float> measuredSimHz{ 0.0f };
+    std::atomic<float> measuredSimLoopHz{ 0.0f };
     std::mutex netStatsMutex;
     Net::NetworkStats netStats{};
+    std::mutex simTimingMutex;
+    SimTimingStats simTiming{};
+    std::mutex debugCountsMutex;
+    RuntimeDebugCounts debugCounts{};
     // Core indices actually assigned (for UI display)
     int renderCoreAssigned = ThreadUtils::CORE_RENDER;
-    int netCoreAssigned = ThreadUtils::CORE_NET_0;
+    int netSendCoreAssigned = ThreadUtils::CORE_NET_0;
+    int netRecvCoreAssigned = ThreadUtils::CORE_NET_1;
+    std::atomic<bool> netSendThreadRunning{ false };
+    std::atomic<bool> netRecvThreadRunning{ false };
     int simCoreAssigned = ThreadUtils::CORE_SIM_0;
+    std::mutex simWorkerCoresMutex;
+    std::vector<int> simWorkerCores;
+    std::atomic<int> simWorkerThreadCount{ 0 };
 
     // ---- Milestone 5: outgoing snapshot (sim -> net) ----
     std::mutex outSnapMutex;
@@ -268,6 +413,8 @@ struct SimSharedState
     // ---- Milestone 5: incoming replica snapshots (net -> sim) ----
     std::mutex inSnapMutex;
     std::unordered_map<uint32_t, ReplicaSnapshotRing> inReplicaHistory; // objectId -> received snapshot ring
+    std::unordered_map<uint32_t, uint32_t> inReplicaLatestTick;
+    std::atomic<uint32_t> staleReplicaPacketsIgnored{ 0 };
 
     // ---- Milestone 7: distributed spawns (sim <-> net) ----
     std::mutex outSpawnMutex;
@@ -281,12 +428,14 @@ struct SimSharedState
     std::atomic<float> replicaInterpDelayMs{ 140.0f };
     std::atomic<float> replicaMaxExtrapolationMs{ 100.0f };
     std::atomic<float> replicaCorrectionThreshold{ 0.75f };
+    std::atomic<float> replicaCorrectionStrength{ 1.0f };
 
     // Local network impairment tools (affects STATE_SNAPSHOT packets only)
     std::atomic<bool>  netImpairmentEnabled{ false };
     std::atomic<float> netLatencyMs{ 0.0f };
     std::atomic<float> netJitterMs{ 0.0f };
     std::atomic<float> netDropPercent{ 0.0f };
+    std::atomic<float> snapshotSendHz{ 0.0f };
 
     // Snapshot buffer (sim -> render)
     SnapshotBuffer snapshotBuf;
@@ -299,7 +448,12 @@ struct RenderCamera
 {
     glm::vec3 position{ 0.0f, 3.0f, -8.0f };
     glm::vec3 rotation{ 0.0f };   // Euler (pitch, yaw, roll) in radians
+    glm::quat orientation{ 1.0f, 0.0f, 0.0f, 0.0f };
+    bool useOrientation = false;
+    float localForwardZ = -1.0f;
+    CameraComponent::Projection projection = CameraComponent::Projection::Perspective;
     float fov = 60.0f;
+    float orthoSize = 10.0f;
     float nearClip = 0.1f;
     float farClip = 600.0f;
 };
@@ -309,19 +463,38 @@ static CameraRenderData BuildCameraRenderData(const RenderCamera& cam, float asp
     CameraRenderData data{};
     data.position = cam.position;
 
-    const float yaw = cam.rotation.y;
-    const float pitch = cam.rotation.x;
+    glm::vec3 forward{};
+    glm::vec3 up{ 0, 1, 0 };
+    if (cam.useOrientation)
+    {
+        const glm::mat3 basis = glm::mat3_cast(cam.orientation);
+        forward = glm::normalize(basis * glm::vec3(0, 0, cam.localForwardZ));
+        up = glm::normalize(basis * glm::vec3(0, 1, 0));
+    }
+    else
+    {
+        const float yaw = cam.rotation.y;
+        const float pitch = cam.rotation.x;
+        forward = glm::vec3{
+            std::cos(pitch) * std::sin(yaw),
+            std::sin(pitch),
+            std::cos(pitch) * std::cos(yaw)
+        };
+    }
 
-    glm::vec3 forward{
-        std::cos(pitch) * std::sin(yaw),
-        std::sin(pitch),
-        std::cos(pitch) * std::cos(yaw)
-    };
+    data.view = glm::lookAt(cam.position, cam.position + forward, up);
 
-    data.view = glm::lookAt(cam.position, cam.position + forward, glm::vec3(0, 1, 0));
-
-    const float fovRad = glm::radians(cam.fov);
-    data.proj = glm::perspective(fovRad, aspect, cam.nearClip, cam.farClip);
+    if (cam.projection == CameraComponent::Projection::Orthographic)
+    {
+        const float halfHeight = std::max(0.1f, cam.orthoSize) * 0.5f;
+        const float halfWidth = halfHeight * aspect;
+        data.proj = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, cam.nearClip, cam.farClip);
+    }
+    else
+    {
+        const float fovRad = glm::radians(cam.fov);
+        data.proj = glm::perspective(fovRad, aspect, cam.nearClip, cam.farClip);
+    }
     data.proj[1][1] *= -1.0f; // Vulkan Y-flip
     return data;
 }
@@ -340,6 +513,231 @@ static glm::vec3 OwnerColor(int ownerId)
         {1.0f, 1.0f, 0.2f},  // 3 yellow
     };
     return k[ownerId % (int)(sizeof(k) / sizeof(k[0]))];
+}
+
+struct SceneCameraOption
+{
+    Entity entity = INVALID_ENTITY;
+    std::string name;
+    CameraComponent::Projection projection = CameraComponent::Projection::Perspective;
+};
+
+static std::vector<SceneCameraOption> CollectSceneCameras(World& world)
+{
+    std::vector<SceneCameraOption> cameras;
+    world.forEach<CameraComponent>([&](Entity e, CameraComponent& cam)
+        {
+            SceneCameraOption option{};
+            option.entity = e;
+            option.projection = cam.projection;
+            if (auto* name = world.getComponent<NameComponent>(e))
+                option.name = name->name;
+            if (option.name.empty())
+                option.name = "Camera " + std::to_string(cameras.size() + 1);
+            cameras.push_back(std::move(option));
+        });
+    return cameras;
+}
+
+static glm::vec3 EstimateSceneCenter(World& world)
+{
+    glm::vec3 sum{ 0.0f };
+    uint32_t count = 0;
+
+    world.forEach<RenderMeshComponent>([&](Entity e, RenderMeshComponent&)
+        {
+            if (world.getComponent<CameraComponent>(e))
+                return;
+            if (auto* tr = world.getComponent<TransformComponent>(e))
+            {
+                sum += tr->position;
+                ++count;
+            }
+        });
+
+    if (count == 0)
+        return glm::vec3(0.0f);
+
+    return sum / static_cast<float>(count);
+}
+
+struct SceneBounds
+{
+    glm::vec3 min{ 0.0f };
+    glm::vec3 max{ 0.0f };
+    bool valid = false;
+};
+
+static SceneBounds EstimateSceneBounds(World& world)
+{
+    SceneBounds bounds{};
+
+    world.forEach<RenderMeshComponent>([&](Entity e, RenderMeshComponent&)
+        {
+            if (world.getComponent<CameraComponent>(e))
+                return;
+
+            const auto* tr = world.getComponent<TransformComponent>(e);
+            if (!tr)
+                return;
+
+            const glm::vec3 halfExtent = glm::max(glm::abs(tr->scale) * 0.5f, glm::vec3(0.5f));
+            const glm::vec3 pMin = tr->position - halfExtent;
+            const glm::vec3 pMax = tr->position + halfExtent;
+
+            if (!bounds.valid)
+            {
+                bounds.min = pMin;
+                bounds.max = pMax;
+                bounds.valid = true;
+                return;
+            }
+
+            bounds.min = glm::min(bounds.min, pMin);
+            bounds.max = glm::max(bounds.max, pMax);
+        });
+
+    return bounds;
+}
+
+static void FitOrthographicCameraToScene(World& world, RenderCamera& renderCamera)
+{
+    const SceneBounds bounds = EstimateSceneBounds(world);
+    if (!bounds.valid)
+        return;
+
+    const glm::mat3 basis = glm::mat3_cast(renderCamera.orientation);
+    const glm::vec3 right = glm::normalize(basis * glm::vec3(1, 0, 0));
+    const glm::vec3 up = glm::normalize(basis * glm::vec3(0, 1, 0));
+    const glm::vec3 forward = glm::normalize(basis * glm::vec3(0, 0, renderCamera.localForwardZ));
+    const glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
+    const float authoredDistance = glm::dot(center - renderCamera.position, forward);
+    const float viewDistance = std::max(1.0f, authoredDistance);
+
+    // Orthographic cameras should frame around their view centre. Some authored
+    // top/side cameras use a good direction but are slightly off-centre, which
+    // leaves the scene outside the orthographic box.
+    renderCamera.position = center - forward * viewDistance;
+
+    float minRight = std::numeric_limits<float>::max();
+    float maxRight = std::numeric_limits<float>::lowest();
+    float minUp = std::numeric_limits<float>::max();
+    float maxUp = std::numeric_limits<float>::lowest();
+    float minDepth = std::numeric_limits<float>::max();
+    float maxDepth = std::numeric_limits<float>::lowest();
+
+    for (int xi = 0; xi < 2; ++xi)
+    {
+        for (int yi = 0; yi < 2; ++yi)
+        {
+            for (int zi = 0; zi < 2; ++zi)
+            {
+                const glm::vec3 p{
+                    xi ? bounds.max.x : bounds.min.x,
+                    yi ? bounds.max.y : bounds.min.y,
+                    zi ? bounds.max.z : bounds.min.z
+                };
+                const glm::vec3 rel = p - renderCamera.position;
+                const float r = glm::dot(rel, right);
+                const float u = glm::dot(rel, up);
+                const float d = glm::dot(rel, forward);
+
+                minRight = std::min(minRight, r);
+                maxRight = std::max(maxRight, r);
+                minUp = std::min(minUp, u);
+                maxUp = std::max(maxUp, u);
+                minDepth = std::min(minDepth, d);
+                maxDepth = std::max(maxDepth, d);
+            }
+        }
+    }
+
+    const float width = std::max(0.1f, maxRight - minRight);
+    const float height = std::max(0.1f, maxUp - minUp);
+    const float fittedSize = std::max(width, height) * 1.15f;
+    renderCamera.orthoSize = std::max(renderCamera.orthoSize, fittedSize);
+
+    const float depthPad = std::max(2.0f, (maxDepth - minDepth) * 0.25f);
+    renderCamera.nearClip = std::max(0.01f, std::min(0.1f, minDepth - depthPad));
+    renderCamera.farClip = std::max(renderCamera.nearClip + 1.0f, maxDepth + depthPad);
+}
+
+static bool ApplySceneCamera(World& world, Entity cameraEntity, RenderCamera& renderCamera)
+{
+    auto* tr = world.getComponent<TransformComponent>(cameraEntity);
+    auto* cam = world.getComponent<CameraComponent>(cameraEntity);
+    if (!tr || !cam)
+        return false;
+
+    renderCamera.position = tr->position;
+    renderCamera.rotation = tr->rotation;
+    renderCamera.orientation = tr->orientation;
+    renderCamera.useOrientation = true;
+    {
+        const glm::mat3 basis = glm::mat3_cast(renderCamera.orientation);
+        const glm::vec3 toScene = EstimateSceneCenter(world) - renderCamera.position;
+        if (glm::dot(toScene, toScene) > 1e-6f)
+        {
+            const glm::vec3 forwardNegZ = glm::normalize(basis * glm::vec3(0, 0, -1));
+            const glm::vec3 forwardPosZ = glm::normalize(basis * glm::vec3(0, 0, 1));
+            renderCamera.localForwardZ =
+                glm::dot(glm::normalize(toScene), forwardPosZ) >
+                glm::dot(glm::normalize(toScene), forwardNegZ)
+                ? 1.0f
+                : -1.0f;
+        }
+        else
+        {
+            renderCamera.localForwardZ = -1.0f;
+        }
+    }
+    renderCamera.projection = cam->projection;
+    renderCamera.fov = cam->fov;
+    renderCamera.orthoSize = cam->orthoSize;
+    renderCamera.nearClip = cam->nearClip;
+    renderCamera.farClip = cam->farClip;
+    if (renderCamera.projection == CameraComponent::Projection::Orthographic)
+        FitOrthographicCameraToScene(world, renderCamera);
+    return true;
+}
+
+static RuntimeDebugCounts BuildRuntimeDebugCounts(
+    World& world,
+    int localPeerId,
+    const PhysicsSystem& physicsSystem,
+    const CollisionSystem& collisionSystem)
+{
+    RuntimeDebugCounts counts{};
+    world.forEach<OwnerComponent>([&](Entity e, OwnerComponent& owner)
+        {
+            if (owner.ownerId < 0)
+            {
+                if (world.getComponent<AnimatedPathComponent>(e))
+                    ++counts.animatedObjects;
+                else if (world.getComponent<PhysicsComponent>(e))
+                    ++counts.staticObjects;
+            }
+            else if (owner.ownerId == localPeerId - 1)
+            {
+                ++counts.localOwned;
+            }
+            else
+            {
+                ++counts.remoteOwned;
+            }
+
+            if (world.getComponent<PhysicsComponent>(e) &&
+                world.getComponent<NameComponent>(e) &&
+                e >= 1000)
+            {
+                ++counts.spawnedObjects;
+            }
+        });
+
+    counts.dynamicBodies = static_cast<uint32_t>(physicsSystem.DynamicBodyCount());
+    counts.collisionCandidates = collisionSystem.LastCandidatePairs();
+    counts.collisionContacts = collisionSystem.LastContactCount();
+    return counts;
 }
 
 // ============================================================================
@@ -561,21 +959,43 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
     ThreadUtils::SetCurrentThreadName("Sim");
     shared.simCoreAssigned = assignedCore;
 
+    std::vector<int> simWorkerCores;
+    for (int core = ThreadUtils::CORE_SIM_0; core < numCores; ++core)
+        simWorkerCores.push_back(core);
+    if (simWorkerCores.empty())
+        simWorkerCores.push_back(assignedCore);
+
+    physicsSystem.SetWorkerCores(simWorkerCores);
+    physicsSystem.SetWorkerCount(static_cast<int>(simWorkerCores.size()));
+    shared.simWorkerThreadCount.store(
+        std::max(0, static_cast<int>(simWorkerCores.size()) - 1),
+        std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(shared.simWorkerCoresMutex);
+        shared.simWorkerCores = simWorkerCores;
+    }
+
     LoopController lc(shared.targetSimHz.load(std::memory_order_relaxed));
     uint64_t tickNumber = 0;
     float    accumulator = 0.0f;
+    float    renderSnapshotAccum = 0.0f;
+    float    netStateGenerationAccum = 0.0f;
+    RateCounter simTickRate;
+    TimingAccumulator timing;
     const float maxDt = 0.25f;
 
     while (shared.appRunning.load(std::memory_order_relaxed))
     {
+        const double simLoopStartSec = NowSeconds();
         // Live-apply target Hz changes
         lc.setTargetHz(shared.targetSimHz.load(std::memory_order_relaxed));
 
         float dt = lc.beginFrame();
-        shared.measuredSimHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
+        shared.measuredSimLoopHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
 
         // Clamp to avoid runaway catch-up
         dt = std::min(dt, maxDt);
+        uint32_t simTicksThisLoop = 0;
 
         // Read controls
         const bool   running = shared.simRunning.load(std::memory_order_relaxed);
@@ -620,6 +1040,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     std::cout << "[T] SIM applying scene idx=" << desired
                         << " t=" << t << "ms\n";
                     scenarios.SwitchTo(world, desired);
+                    physicsSystem.InitializePhysicsBodies(world);
                     accumulator = 0.0f;
 
                     if (scenarios.Current())
@@ -635,6 +1056,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     {
                         std::lock_guard<std::mutex> lk(shared.inSnapMutex);
                         shared.inReplicaHistory.clear();
+                        shared.inReplicaLatestTick.clear();
                     }
                     {
                         std::lock_guard<std::mutex> lk(shared.outSnapMutex);
@@ -671,6 +1093,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             const float interpDelayMs = shared.replicaInterpDelayMs.load(std::memory_order_relaxed);
             const float maxExtrapMs = shared.replicaMaxExtrapolationMs.load(std::memory_order_relaxed);
             const float correctionThreshold = shared.replicaCorrectionThreshold.load(std::memory_order_relaxed);
+            const float correctionStrength = shared.replicaCorrectionStrength.load(std::memory_order_relaxed);
             const float smoothingDt = std::max(0.0f, dt);
             const double sampleTimeSec = NowSeconds() - std::max(0.0f, interpDelayMs) * 0.001;
             const float maxExtrapSec = std::max(0.0f, maxExtrapMs) * 0.001f;
@@ -721,7 +1144,8 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     << " smoothing=" << (smoothingEnabled ? "yes" : "no")
                     << "\n";
                     */
-                
+                if (!smoothingEnabled)
+                {
                     phys->body.SetPosition(target.pos);
                     phys->body.SetOrientation(target.rot);
                     phys->body.SetLinearVelocity(target.linVel);
@@ -729,7 +1153,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     tr->position = target.pos;
                     tr->rotation = glm::eulerAngles(target.rot);
                     continue;
-                
+                }
 
                 const glm::vec3 currentPos = phys->body.Position();
                 const glm::quat currentRot = phys->body.Orientation();
@@ -739,7 +1163,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 const float posError = glm::length(target.pos - currentPos);
                 const bool largeError = posError > correctionThreshold;
 
-                float spring = largeError ? 7.0f : 16.0f;
+                float spring = (largeError ? 7.0f : 16.0f) * std::max(0.0f, correctionStrength);
                 if (usedExtrapolation)
                     spring *= 0.75f;
 
@@ -809,6 +1233,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     {
                         std::lock_guard<std::mutex> lk(shared.inSnapMutex);
                         shared.inReplicaHistory.clear();
+                        shared.inReplicaLatestTick.clear();
                     }
 
                     {
@@ -861,6 +1286,9 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                     fb->SpawnFromNetworkEvent(world, payload);
                 }
+
+                if (!incomingSpawns.empty())
+                    physicsSystem.InitializePhysicsBodies(world);
             }
 
             // ------------------------------------------------------------
@@ -874,27 +1302,73 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 else if (doStep)
                     accumulator += fdt;
 
-                while (accumulator >= fdt)
+                constexpr int MAX_FIXED_SUBSTEPS_PER_FRAME = 32;
+                int substepsThisFrame = 0;
+
+                while (accumulator >= fdt && substepsThisFrame < MAX_FIXED_SUBSTEPS_PER_FRAME)
                 {
+                    size_t pendingSpawnsBeforeUpdate = 0;
+                    if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
+                        pendingSpawnsBeforeUpdate = fb->PendingSpawnCount();
+
+                    const double scenarioStartSec = NowSeconds();
                     s->Update(world, fdt, currentSceneGeneration);
+                    const double physicsStartSec = NowSeconds();
+
+                    if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
+                    {
+                        if (fb->PendingSpawnCount() != pendingSpawnsBeforeUpdate)
+                            physicsSystem.InitializePhysicsBodies(world);
+                    }
+
                     physicsSystem.Update(world, fdt);
+                    const double collisionStartSec = NowSeconds();
                     collisionSystem.Update(world);
+                    const double collisionEndSec = NowSeconds();
+
+                    timing.scenario.Add(TimingAccumulator::Ms(scenarioStartSec, physicsStartSec));
+                    timing.physics.Add(TimingAccumulator::Ms(physicsStartSec, collisionStartSec));
+            timing.collision.Add(TimingAccumulator::Ms(collisionStartSec, collisionEndSec));
 
                     accumulator -= fdt;
                     ++tickNumber;
+                    ++substepsThisFrame;
+                    ++simTicksThisLoop;
                 }
+
+                if (accumulator >= fdt)
+                    accumulator = 0.0f;
             }
             else
             {
                 if (running || doStep)
                 {
                     const float stepDt = running ? dt : fdt;
+                    size_t pendingSpawnsBeforeUpdate = 0;
+                    if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
+                        pendingSpawnsBeforeUpdate = fb->PendingSpawnCount();
 
+                    const double scenarioStartSec = NowSeconds();
                     s->Update(world, stepDt, currentSceneGeneration);
+                    const double physicsStartSec = NowSeconds();
+
+                    if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
+                    {
+                        if (fb->PendingSpawnCount() != pendingSpawnsBeforeUpdate)
+                            physicsSystem.InitializePhysicsBodies(world);
+                    }
+
                     physicsSystem.Update(world, stepDt);
+                    const double collisionStartSec = NowSeconds();
                     collisionSystem.Update(world);
+                    const double collisionEndSec = NowSeconds();
+
+                    timing.scenario.Add(TimingAccumulator::Ms(scenarioStartSec, physicsStartSec));
+                    timing.physics.Add(TimingAccumulator::Ms(physicsStartSec, collisionStartSec));
+                    timing.collision.Add(TimingAccumulator::Ms(collisionStartSec, collisionEndSec));
 
                     ++tickNumber;
+                    ++simTicksThisLoop;
                 }
             }
 
@@ -926,8 +1400,24 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             }
         }
 
+        const double nowSecForRate = NowSeconds();
+        const float tickHz = simTickRate.Add(simTicksThisLoop, nowSecForRate);
+        if (tickHz >= 0.0f)
+            shared.measuredSimHz.store(tickHz, std::memory_order_relaxed);
+
         // ----- Milestone 5: build outgoing STATE_SNAPSHOT (owned dynamics) -----
+        const float snapshotHzForGeneration = shared.snapshotSendHz.load(std::memory_order_relaxed);
+        const float snapshotGenerationInterval =
+            (snapshotHzForGeneration > 0.0f) ? (1.0f / snapshotHzForGeneration) : 0.0f;
+        netStateGenerationAccum += dt;
+        const bool generateNetworkState =
+            simTicksThisLoop > 0 &&
+            (snapshotGenerationInterval <= 0.0f || netStateGenerationAccum >= snapshotGenerationInterval);
+
+        if (generateNetworkState)
         {
+            netStateGenerationAccum = 0.0f;
+            const double netStateStartSec = NowSeconds();
             std::vector<Net::StateSnapshotItem> items;
             items.reserve(4096);
 
@@ -978,69 +1468,302 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     items.push_back(it);
                 });
 
-            std::lock_guard<std::mutex> lk(shared.outSnapMutex);
-            shared.outOwnedItems = std::move(items);
-            shared.outTick = (uint32_t)tickNumber;
-            shared.outDirty = true;
+            const double lockStartSec = NowSeconds();
+            {
+                std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                shared.outOwnedItems = std::move(items);
+                shared.outTick = (uint32_t)tickNumber;
+                shared.outDirty = true;
+            }
+            const double lockEndSec = NowSeconds();
+
+            timing.netState.Add(TimingAccumulator::Ms(netStateStartSec, lockStartSec));
+            timing.lock.Add(TimingAccumulator::Ms(lockStartSec, lockEndSec));
         }
 
-        // Publish render snapshot every tick
-        shared.snapshotBuf.publish(CaptureSnapshot(world, tickNumber, shared));
+        const float renderHz = shared.targetRenderHz.load(std::memory_order_relaxed);
+        const float renderSnapshotInterval = (renderHz > 0.0f) ? (1.0f / renderHz) : 0.0f;
+        renderSnapshotAccum += dt;
+        if (renderSnapshotInterval <= 0.0f || renderSnapshotAccum >= renderSnapshotInterval)
+        {
+            renderSnapshotAccum = 0.0f;
+            const double renderSnapshotStartSec = NowSeconds();
+            shared.snapshotBuf.publish(CaptureSnapshot(world, tickNumber, shared));
+            const double renderSnapshotEndSec = NowSeconds();
+            timing.renderSnapshot.Add(TimingAccumulator::Ms(renderSnapshotStartSec, renderSnapshotEndSec));
+        }
+
+        timing.simLoop.Add(TimingAccumulator::Ms(simLoopStartSec, NowSeconds()));
+
+        SimTimingStats publishedTiming{};
+        if (timing.PublishIfReady(NowSeconds(), publishedTiming))
+        {
+            std::lock_guard<std::mutex> lk(shared.simTimingMutex);
+            shared.simTiming = publishedTiming;
+        }
+
+        {
+            RuntimeDebugCounts counts =
+                BuildRuntimeDebugCounts(world, localPeerId, physicsSystem, collisionSystem);
+            std::lock_guard<std::mutex> lk(shared.debugCountsMutex);
+            shared.debugCounts = counts;
+        }
 
         lc.endFrame();
     }
 }
 
+struct NetworkRuntime
+{
+    Net::NetworkingSystem net;
+    std::mutex mutex;
+};
+
+static int ClampCoreForMachine(int desiredCore, int fallbackCore)
+{
+    const int numCores = ThreadUtils::LogicalCoreCount();
+    if (numCores <= 0)
+        return 0;
+    if (desiredCore < numCores)
+        return desiredCore;
+    if (fallbackCore < numCores)
+        return fallbackCore;
+    return numCores - 1;
+}
+
 // ============================================================================
-// Networking thread entry point
+// Network receive thread. Pinned to logical processor 1 where available.
 // ============================================================================
-static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& cfg)
+static void NetworkReceiveThreadFunc(
+    SimSharedState& shared,
+    const Net::PeerConfig& cfg,
+    NetworkRuntime& runtime)
 {
     using namespace Net;
-    const int localPeerId = cfg.peer_id;
 
-    // ---- Thread setup ----
-    const int numCores = ThreadUtils::LogicalCoreCount();
-    const int assignedCore = (ThreadUtils::CORE_NET_0 < numCores)
-        ? ThreadUtils::CORE_NET_0
-        : (numCores - 1);
-
-    ThreadUtils::PinCurrentThreadToCore(assignedCore);
-    ThreadUtils::SetCurrentThreadName("Net");
-    shared.netCoreAssigned = assignedCore;
-
-    NetworkingSystem net;
-    if (!net.Init(cfg))
-        return;
+    const int assignedRecvCore =
+        ClampCoreForMachine(ThreadUtils::CORE_NET_0, ThreadUtils::CORE_RENDER);
+    ThreadUtils::PinCurrentThread(ThreadUtils::CoreMask(assignedRecvCore));
+    ThreadUtils::SetCurrentThreadName("NetRecv");
+    shared.netRecvCoreAssigned = assignedRecvCore;
+    shared.netRecvThreadRunning.store(true, std::memory_order_release);
 
     LoopController lc(shared.targetNetworkHz.load(std::memory_order_relaxed));
 
-    // Snapshot send throttling.
+    while (shared.appRunning.load(std::memory_order_relaxed))
+    {
+        lc.setTargetHz(shared.targetNetworkHz.load(std::memory_order_relaxed));
+        const float dt = lc.beginFrame();
+        shared.measuredNetworkRecvHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
+
+        std::vector<GlobalCommandPayload> commands;
+        std::vector<std::pair<uint32_t, std::vector<StateSnapshotItem>>> snapshots;
+        std::vector<SpawnObjectPayload> spawns;
+        NetworkStats stats{};
+
+        {
+            std::lock_guard<std::mutex> netLock(runtime.mutex);
+            runtime.net.SetCurrentSceneGeneration(
+                shared.sceneGeneration.load(std::memory_order_acquire));
+            runtime.net.UpdateReceive(dt);
+
+            GlobalCommandPayload cmd{};
+            while (runtime.net.PopReceivedGlobalCommand(cmd))
+                commands.push_back(cmd);
+
+            std::vector<StateSnapshotItem> items;
+            uint32_t tick = 0;
+            while (runtime.net.PopReceivedStateSnapshot(items, tick))
+            {
+                snapshots.emplace_back(tick, std::move(items));
+                items.clear();
+            }
+
+            SpawnObjectPayload payload{};
+            while (runtime.net.PopReceivedSpawnObject(payload))
+                spawns.push_back(payload);
+
+            stats = runtime.net.GetStats();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(shared.netStatsMutex);
+            shared.netStats = stats;
+        }
+
+        for (const auto& cmd : commands)
+        {
+            const auto type = (GlobalCommandType)cmd.commandType;
+
+            const ULONGLONG t = GetTickCount64();
+            std::cout << "[T] NET recv popped GLOBAL cmd scene=" << cmd.sceneIndex
+                << " generation=" << cmd.sceneGeneration
+                << " t=" << t << "ms\n";
+
+            if (type == GlobalCommandType::SceneChange)
+            {
+                shared.sceneGeneration.store(
+                    cmd.sceneGeneration,
+                    std::memory_order_release);
+
+                shared.pendingSceneGeneration.store(
+                    cmd.sceneGeneration,
+                    std::memory_order_release);
+
+                shared.pendingSceneIndex.store(
+                    cmd.sceneIndex,
+                    std::memory_order_relaxed);
+
+                shared.pendingSceneChange.store(
+                    true,
+                    std::memory_order_release);
+
+                {
+                    std::lock_guard<std::mutex> netLock(runtime.mutex);
+                    runtime.net.SetCurrentSceneGeneration(cmd.sceneGeneration);
+                    runtime.net.ClearSceneObjectTraffic();
+                    runtime.net.PauseSnapshotTraffic(0.25f);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                    shared.outOwnedItems.clear();
+                    shared.outTick = 0;
+                    shared.outDirty = false;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                    shared.outSpawnEvents.clear();
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                    shared.inReplicaHistory.clear();
+                    shared.inReplicaLatestTick.clear();
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                    shared.inSpawnEvents.clear();
+                }
+            }
+            else if (type == GlobalCommandType::GravityOnOff)
+            {
+                shared.pendingGravityEnabled.store(
+                    cmd.gravityEnabled != 0,
+                    std::memory_order_relaxed);
+
+                shared.pendingGravityChange.store(
+                    true,
+                    std::memory_order_release);
+            }
+        }
+
+        for (auto& snapshot : snapshots)
+        {
+            const uint32_t tick = snapshot.first;
+            const double nowSec = NowSeconds();
+
+            std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+            for (const auto& it : snapshot.second)
+            {
+                auto latestIt = shared.inReplicaLatestTick.find(it.objectId);
+                if (latestIt != shared.inReplicaLatestTick.end() && tick <= latestIt->second)
+                {
+                    shared.staleReplicaPacketsIgnored.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                shared.inReplicaLatestTick[it.objectId] = tick;
+
+                ReplicaState st{};
+                st.objectId = it.objectId;
+                st.pos = glm::vec3(it.pos.x, it.pos.y, it.pos.z);
+                st.rot = glm::quat(it.rot.w, it.rot.x, it.rot.y, it.rot.z);
+                st.linVel = glm::vec3(it.linVel.x, it.linVel.y, it.linVel.z);
+                st.angVel = glm::vec3(it.angVel.x, it.angVel.y, it.angVel.z);
+                st.tick = tick;
+                st.recvTimeSec = nowSec;
+
+                auto& ring = shared.inReplicaHistory[it.objectId];
+                ring.Push(st);
+            }
+        }
+
+        if (!spawns.empty())
+        {
+            const uint32_t currentGeneration =
+                shared.sceneGeneration.load(std::memory_order_acquire);
+
+            std::vector<SpawnObjectPayload> validSpawns;
+            for (const auto& payload : spawns)
+            {
+                if (payload.sceneGeneration == currentGeneration)
+                    validSpawns.push_back(payload);
+            }
+
+            if (!validSpawns.empty())
+            {
+                std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                shared.inSpawnEvents.insert(
+                    shared.inSpawnEvents.end(),
+                    validSpawns.begin(),
+                    validSpawns.end());
+            }
+        }
+
+        lc.endFrame();
+    }
+
+    shared.netRecvThreadRunning.store(false, std::memory_order_release);
+}
+
+// ============================================================================
+// Network send thread. Pinned to logical processor 2 where available.
+// ============================================================================
+static void NetworkSendThreadFunc(
+    SimSharedState& shared,
+    const Net::PeerConfig& cfg,
+    NetworkRuntime& runtime)
+{
+    using namespace Net;
+
+    const int assignedSendCore =
+        ClampCoreForMachine(ThreadUtils::CORE_NET_1, ThreadUtils::CORE_NET_0);
+    ThreadUtils::PinCurrentThread(ThreadUtils::CoreMask(assignedSendCore));
+    ThreadUtils::SetCurrentThreadName("NetSend");
+    shared.netSendCoreAssigned = assignedSendCore;
+    shared.netSendThreadRunning.store(true, std::memory_order_release);
+
+    LoopController lc(shared.targetNetworkHz.load(std::memory_order_relaxed));
+
+    // Snapshot send throttling. 0 Hz means every fresh simulation tick.
     float snapshotSendAccum = 0.0f;
-    constexpr float SNAPSHOT_SEND_HZ = 20.0f;
-    constexpr float SNAPSHOT_SEND_INTERVAL = 1.0f / SNAPSHOT_SEND_HZ;
 
     while (shared.appRunning.load(std::memory_order_relaxed))
     {
         lc.setTargetHz(shared.targetNetworkHz.load(std::memory_order_relaxed));
 
         float dt = lc.beginFrame();
+        shared.measuredNetworkSendHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
         shared.measuredNetworkHz.store(lc.getMeasuredHz(), std::memory_order_relaxed);
 
         // Keep networking layer aligned with the currently valid scene generation.
-        net.SetCurrentSceneGeneration(
-            shared.sceneGeneration.load(std::memory_order_acquire));
-
         Net::SnapshotImpairmentSettings impair{};
         impair.enabled = shared.netImpairmentEnabled.load(std::memory_order_relaxed);
         impair.latencyMs = shared.netLatencyMs.load(std::memory_order_relaxed);
         impair.jitterMs = shared.netJitterMs.load(std::memory_order_relaxed);
         impair.dropPercent = shared.netDropPercent.load(std::memory_order_relaxed);
-        net.SetSnapshotImpairment(impair);
+        {
+            std::lock_guard<std::mutex> netLock(runtime.mutex);
+            runtime.net.SetCurrentSceneGeneration(
+                shared.sceneGeneration.load(std::memory_order_acquire));
+            runtime.net.SetSnapshotImpairment(impair);
+        }
 
         // ------------------------------------------------------------
         // High-priority outgoing global commands.
-        // These must happen before net.Update(dt), so they are not stuck
+        // These must happen before reliable resends, so they are not stuck
         // behind snapshot/resend processing.
         // ------------------------------------------------------------
 
@@ -1052,12 +1775,14 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             const uint32_t generation =
                 shared.sendSceneGeneration.load(std::memory_order_acquire);
 
-            // Old scene object traffic is no longer valid.
-            net.ClearSceneObjectTraffic();
-            net.PauseSnapshotTraffic(0.25f);
-            net.SetCurrentSceneGeneration(generation);
-
-            net.SendSceneChange(idx, generation);
+            {
+                std::lock_guard<std::mutex> netLock(runtime.mutex);
+                // Old scene object traffic is no longer valid.
+                runtime.net.ClearSceneObjectTraffic();
+                runtime.net.PauseSnapshotTraffic(0.25f);
+                runtime.net.SetCurrentSceneGeneration(generation);
+                runtime.net.SendSceneChange(idx, generation);
+            }
         }
 
         if (shared.sendGravityChange.exchange(false, std::memory_order_acq_rel))
@@ -1065,19 +1790,27 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             const bool enabled =
                 shared.sendGravityEnabled.load(std::memory_order_relaxed);
 
-            net.PauseSnapshotTraffic(0.10f);
-            net.SendGravityEnabled(enabled);
+            {
+                std::lock_guard<std::mutex> netLock(runtime.mutex);
+                runtime.net.PauseSnapshotTraffic(0.10f);
+                runtime.net.SendGravityEnabled(enabled);
+            }
         }
 
         // ------------------------------------------------------------
-        // Process sockets / ACKs / reliable resends / delayed snapshots.
+        // Process reliable resends / delayed outgoing snapshots.
         // ------------------------------------------------------------
 
-        net.Update(dt);
+        NetworkStats stats{};
+        {
+            std::lock_guard<std::mutex> netLock(runtime.mutex);
+            runtime.net.UpdateSend(dt);
+            stats = runtime.net.GetStats();
+        }
 
         {
             std::lock_guard<std::mutex> lk(shared.netStatsMutex);
-            shared.netStats = net.GetStats();
+            shared.netStats = stats;
         }
 
         // ------------------------------------------------------------
@@ -1110,83 +1843,8 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
                 if (spawn.sceneGeneration != currentGeneration)
                     continue;
 
-                net.SendSpawnObject(spawn);
-            }
-        }
-
-        // ------------------------------------------------------------
-        // Receive incoming global commands and forward to sim thread.
-        // ------------------------------------------------------------
-
-        GlobalCommandPayload cmd{};
-        while (net.PopReceivedGlobalCommand(cmd))
-        {
-            const auto type = (GlobalCommandType)cmd.commandType;
-
-            const ULONGLONG t = GetTickCount64();
-            std::cout << "[T] NET popped GLOBAL cmd scene=" << cmd.sceneIndex
-                << " generation=" << cmd.sceneGeneration
-                << " t=" << t << "ms\n";
-
-            if (type == GlobalCommandType::SceneChange)
-            {
-                // Use the sender's generation.
-                // Do NOT increment locally on received scene changes.
-                shared.sceneGeneration.store(
-                    cmd.sceneGeneration,
-                    std::memory_order_release);
-
-                shared.pendingSceneGeneration.store(
-                    cmd.sceneGeneration,
-                    std::memory_order_release);
-
-                shared.pendingSceneIndex.store(
-                    cmd.sceneIndex,
-                    std::memory_order_relaxed);
-
-                shared.pendingSceneChange.store(
-                    true,
-                    std::memory_order_release);
-
-                // Keep network layer immediately aligned too.
-                net.SetCurrentSceneGeneration(cmd.sceneGeneration);
-
-                // Clear any outgoing old-scene object data.
-                {
-                    std::lock_guard<std::mutex> lk(shared.outSnapMutex);
-                    shared.outOwnedItems.clear();
-                    shared.outTick = 0;
-                    shared.outDirty = false;
-                }
-
-                {
-                    std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
-                    shared.outSpawnEvents.clear();
-                }
-
-                // Also clear incoming old-scene data.
-                {
-                    std::lock_guard<std::mutex> lk(shared.inSnapMutex);
-                    shared.inReplicaHistory.clear();
-                }
-
-                {
-                    std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
-                    shared.inSpawnEvents.clear();
-                }
-
-                net.ClearSceneObjectTraffic();
-                net.PauseSnapshotTraffic(0.25f);
-            }
-            else if (type == GlobalCommandType::GravityOnOff)
-            {
-                shared.pendingGravityEnabled.store(
-                    cmd.gravityEnabled != 0,
-                    std::memory_order_relaxed);
-
-                shared.pendingGravityChange.store(
-                    true,
-                    std::memory_order_release);
+                std::lock_guard<std::mutex> netLock(runtime.mutex);
+                runtime.net.SendSpawnObject(spawn);
             }
         }
 
@@ -1195,6 +1853,8 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
         // ------------------------------------------------------------
 
         snapshotSendAccum += dt;
+        const float snapshotHz = shared.snapshotSendHz.load(std::memory_order_relaxed);
+        const float snapshotInterval = (snapshotHz > 0.0f) ? (1.0f / snapshotHz) : 0.0f;
 
         if (shared.sceneTransitionActive.load(std::memory_order_acquire))
         {
@@ -1207,9 +1867,12 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             // Avoid immediately sending a snapshot burst when transition ends.
             snapshotSendAccum = 0.0f;
         }
-        else if (snapshotSendAccum >= SNAPSHOT_SEND_INTERVAL)
+        else if (snapshotHz <= 0.0f || snapshotSendAccum >= snapshotInterval)
         {
-            snapshotSendAccum -= SNAPSHOT_SEND_INTERVAL;
+            if (snapshotInterval > 0.0f)
+                snapshotSendAccum = std::max(0.0f, snapshotSendAccum - snapshotInterval);
+            else
+                snapshotSendAccum = 0.0f;
 
             std::vector<StateSnapshotItem> items;
             uint32_t tick = 0;
@@ -1232,7 +1895,8 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
                 const uint32_t generation =
                     shared.sceneGeneration.load(std::memory_order_acquire);
 
-                net.SendStateSnapshot(
+                std::lock_guard<std::mutex> netLock(runtime.mutex);
+                runtime.net.SendStateSnapshot(
                     tick,
                     generation,
                     items.data(),
@@ -1240,72 +1904,10 @@ static void NetworkingThreadFunc(SimSharedState& shared, const Net::PeerConfig& 
             }
         }
 
-        // ------------------------------------------------------------
-        // Receive STATE_SNAPSHOT packets.
-        // NetworkingSystem already filters by sceneGeneration, but we
-        // also only store what it gives us here.
-        // ------------------------------------------------------------
-
-        {
-            std::vector<StateSnapshotItem> items;
-            uint32_t tick = 0;
-
-            while (net.PopReceivedStateSnapshot(items, tick))
-            {
-                std::lock_guard<std::mutex> lk(shared.inSnapMutex);
-                const double nowSec = NowSeconds();
-
-                for (const auto& it : items)
-                {
-                    ReplicaState st{};
-                    st.objectId = it.objectId;
-                    st.pos = glm::vec3(it.pos.x, it.pos.y, it.pos.z);
-                    st.rot = glm::quat(it.rot.w, it.rot.x, it.rot.y, it.rot.z);
-                    st.linVel = glm::vec3(it.linVel.x, it.linVel.y, it.linVel.z);
-                    st.angVel = glm::vec3(it.angVel.x, it.angVel.y, it.angVel.z);
-                    st.tick = tick;
-                    st.recvTimeSec = nowSec;
-
-                    auto& ring = shared.inReplicaHistory[it.objectId];
-                    ring.Push(st);
-                }
-            }
-        }
-
-        // ------------------------------------------------------------
-        // Receive SPAWN_OBJECT packets and forward to sim thread.
-        // NetworkingSystem already filters by sceneGeneration, but we
-        // filter again here for safety.
-        // ------------------------------------------------------------
-
-        {
-            SpawnObjectPayload payload{};
-            std::vector<SpawnObjectPayload> received;
-
-            const uint32_t currentGeneration =
-                shared.sceneGeneration.load(std::memory_order_acquire);
-
-            while (net.PopReceivedSpawnObject(payload))
-            {
-                if (payload.sceneGeneration != currentGeneration)
-                    continue;
-
-                received.push_back(payload);
-            }
-
-            if (!received.empty())
-            {
-                std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
-                shared.inSpawnEvents.insert(
-                    shared.inSpawnEvents.end(),
-                    received.begin(),
-                    received.end());
-            }
-        }
-
         lc.endFrame();
     }
-    net.Shutdown();
+
+    shared.netSendThreadRunning.store(false, std::memory_order_release);
 }
 
 // ============================================================================
@@ -1342,11 +1944,14 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
     if (scenarios.Count() > 0)
         scenarios.SwitchTo(world, 0);
+    physicsSystem.InitializePhysicsBodies(world);
 
     SimSharedState shared;
     shared.targetRenderHz.store(cfg.render_hz, std::memory_order_relaxed);
     shared.targetNetworkHz.store(cfg.network_hz, std::memory_order_relaxed);
     shared.targetSimHz.store(cfg.simulation_hz, std::memory_order_relaxed);
+    if (cfg.simulation_hz > 0.0f)
+        shared.fixedDt.store(1.0f / cfg.simulation_hz, std::memory_order_relaxed);
 
     // Initialise gravity from the initial scene
     if (scenarios.Current())
@@ -1379,7 +1984,9 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 }
                 if (auto* cam = world.getComponent<CameraComponent>(e))
                 {
+                    renderCamera.projection = cam->projection;
                     renderCamera.fov = cam->fov;
+                    renderCamera.orthoSize = cam->orthoSize;
                     renderCamera.nearClip = cam->nearClip;
                     renderCamera.farClip = cam->farClip;
                 }
@@ -1408,11 +2015,34 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         localPeerId
     );
 
-    std::thread netThread(NetworkingThreadFunc, std::ref(shared), std::cref(cfg));
+    NetworkRuntime networkRuntime;
+    const bool networkReady = networkRuntime.net.Init(cfg);
+    std::thread netReceiveThread;
+    std::thread netSendThread;
+    if (networkReady)
+    {
+        netReceiveThread = std::thread(
+            NetworkReceiveThreadFunc,
+            std::ref(shared),
+            std::cref(cfg),
+            std::ref(networkRuntime));
+
+        netSendThread = std::thread(
+            NetworkSendThreadFunc,
+            std::ref(shared),
+            std::cref(cfg),
+            std::ref(networkRuntime));
+    }
 
     // Render / UI loop state
     LoopController renderLC(shared.targetRenderHz.load(std::memory_order_relaxed));
-    CameraRole activeCameraMode = CameraRole::Overview;
+    Entity activeSceneCamera = INVALID_ENTITY;
+    auto sceneCameraOptions = CollectSceneCameras(world);
+    if (!sceneCameraOptions.empty())
+    {
+        activeSceneCamera = sceneCameraOptions.front().entity;
+        ApplySceneCamera(world, activeSceneCamera, renderCamera);
+    }
     const float maxFrameDt = 0.25f;
 
     float displayRenderHz = 0.0f;
@@ -1422,6 +2052,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     float uiRenderHz = cfg.render_hz;
     float uiNetHz = cfg.network_hz;
     float uiSimHz = cfg.simulation_hz;
+    float uiSnapshotHz = shared.snapshotSendHz.load(std::memory_order_relaxed);
 
     while (!glfwWindowShouldClose(window))
     {
@@ -1436,13 +2067,38 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         if (!ImGui::GetIO().WantCaptureKeyboard)
         {
             const float lookSpeed = 1.5f;
-            if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) renderCamera.rotation.y -= lookSpeed * dt;
-            if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)  renderCamera.rotation.y += lookSpeed * dt;
-            if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)    renderCamera.rotation.x += lookSpeed * dt;
-            if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)  renderCamera.rotation.x -= lookSpeed * dt;
+            const float yawDelta =
+                (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS ? lookSpeed * dt : 0.0f) +
+                (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS ? -lookSpeed * dt : 0.0f);
+            const float pitchDelta =
+                (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS ? lookSpeed * dt : 0.0f) +
+                (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS ? -lookSpeed * dt : 0.0f);
 
-            const float pitchLimit = glm::radians(89.0f);
-            renderCamera.rotation.x = glm::clamp(renderCamera.rotation.x, -pitchLimit, pitchLimit);
+            if (renderCamera.useOrientation)
+            {
+                if (yawDelta != 0.0f)
+                {
+                    renderCamera.orientation =
+                        glm::normalize(glm::angleAxis(yawDelta, glm::vec3(0, 1, 0)) * renderCamera.orientation);
+                }
+                if (pitchDelta != 0.0f)
+                {
+                    const glm::mat3 basis = glm::mat3_cast(renderCamera.orientation);
+                    const glm::vec3 right = glm::normalize(basis * glm::vec3(1, 0, 0));
+                    renderCamera.orientation =
+                        glm::normalize(glm::angleAxis(pitchDelta, right) * renderCamera.orientation);
+                }
+                if (yawDelta != 0.0f || pitchDelta != 0.0f)
+                    renderCamera.rotation = glm::eulerAngles(renderCamera.orientation);
+            }
+            else
+            {
+                renderCamera.rotation.y += yawDelta;
+                renderCamera.rotation.x += pitchDelta;
+
+                const float pitchLimit = glm::radians(89.0f);
+                renderCamera.rotation.x = glm::clamp(renderCamera.rotation.x, -pitchLimit, pitchLimit);
+            }
 
             const float moveSpeed = 10.0f;
             glm::vec3 moveLocal(0.0f);
@@ -1456,9 +2112,20 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
             if (moveLocal.x != 0.0f || moveLocal.y != 0.0f || moveLocal.z != 0.0f)
             {
                 moveLocal = glm::normalize(moveLocal);
-                float yaw = renderCamera.rotation.y;
-                glm::vec3 forward(std::sin(yaw), 0.0f, std::cos(yaw));
-                glm::vec3 right(forward.z, 0.0f, -forward.x);
+                glm::vec3 forward{};
+                glm::vec3 right{};
+                if (renderCamera.useOrientation)
+                {
+                    const glm::mat3 basis = glm::mat3_cast(renderCamera.orientation);
+                    forward = glm::normalize(basis * glm::vec3(0, 0, renderCamera.localForwardZ));
+                    right = glm::normalize(basis * glm::vec3(1, 0, 0));
+                }
+                else
+                {
+                    float yaw = renderCamera.rotation.y;
+                    forward = glm::vec3(std::sin(yaw), 0.0f, std::cos(yaw));
+                    right = glm::vec3(forward.z, 0.0f, -forward.x);
+                }
                 glm::vec3 up(0.0f, 1.0f, 0.0f);
                 renderCamera.position += (right * moveLocal.x + up * moveLocal.y + forward * moveLocal.z) * (moveSpeed * dt);
             }
@@ -1466,6 +2133,16 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
         // Snapshot: consume latest from sim thread
         std::shared_ptr<WorldSnapshot> snap = shared.snapshotBuf.consume();
+
+        if (activeSceneCamera == INVALID_ENTITY)
+        {
+            sceneCameraOptions = CollectSceneCameras(world);
+            if (!sceneCameraOptions.empty())
+            {
+                activeSceneCamera = sceneCameraOptions.front().entity;
+                ApplySceneCamera(world, activeSceneCamera, renderCamera);
+            }
+        }
 
         // ImGui
         renderer.BeginImGuiFrame();
@@ -1527,25 +2204,39 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
             if (ImGui::BeginMenu("Camera"))
             {
-                bool isOverview = (activeCameraMode == CameraRole::Overview);
-                bool isNavigation = (activeCameraMode == CameraRole::Navigation);
-
-                if (ImGui::MenuItem("Overview", nullptr, isOverview))
+                sceneCameraOptions = CollectSceneCameras(world);
+                if (!sceneCameraOptions.empty())
                 {
-                    activeCameraMode = CameraRole::Overview;
-                    renderCamera.position = glm::vec3(0.0f, 25.0f, 0.0f);
-                    renderCamera.rotation = glm::radians(glm::vec3(-90.0f, 0.0f, 0.0f));
+                    ImGui::SeparatorText("Scene Cameras (Local)");
+                    for (const auto& camOption : sceneCameraOptions)
+                    {
+                        const bool selected = (activeSceneCamera == camOption.entity);
+                        std::string label = camOption.name;
+                        label += camOption.projection == CameraComponent::Projection::Orthographic
+                            ? " [Orthographic]"
+                            : " [Perspective]";
+
+                        if (ImGui::MenuItem(label.c_str(), nullptr, selected))
+                        {
+                            if (ApplySceneCamera(world, camOption.entity, renderCamera))
+                                activeSceneCamera = camOption.entity;
+                        }
+                    }
+                    ImGui::Separator();
                 }
-                if (ImGui::MenuItem("Navigation", nullptr, isNavigation))
+                else
                 {
-                    activeCameraMode = CameraRole::Navigation;
-                    renderCamera.position = glm::vec3(0.0f, 3.0f, -8.0f);
-                    renderCamera.rotation = glm::radians(glm::vec3(-15.0f, 0.0f, 0.0f));
+                    ImGui::TextDisabled("No FlatBuffer cameras in this scene");
+                    ImGui::Separator();
                 }
 
-                ImGui::Separator();
                 ImGui::DragFloat3("Position", &renderCamera.position.x, 0.1f);
-                ImGui::DragFloat3("Rotation (rad)", &renderCamera.rotation.x, 0.02f);
+                if (ImGui::DragFloat3("Rotation (rad)", &renderCamera.rotation.x, 0.02f))
+                    renderCamera.useOrientation = false;
+                if (renderCamera.projection == CameraComponent::Projection::Orthographic)
+                    ImGui::DragFloat("Ortho Size", &renderCamera.orthoSize, 0.25f, 0.1f, 1000.0f);
+                else
+                    ImGui::DragFloat("FOV", &renderCamera.fov, 0.5f, 10.0f, 170.0f);
                 ImGui::EndMenu();
             }
 
@@ -1588,6 +2279,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                             {
                                 std::lock_guard<std::mutex> lk(shared.inSnapMutex);
                                 shared.inReplicaHistory.clear();
+                                shared.inReplicaLatestTick.clear();
                             }
 
                             {
@@ -1605,6 +2297,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                                 << "\n";
                             // Apply locally immediately.
                             shared.requestedSceneIndex.store(si, std::memory_order_release);
+                            activeSceneCamera = INVALID_ENTITY;
 
                             // Send globally with the same generation.
                             shared.sendSceneGeneration.store(newGeneration, std::memory_order_release);
@@ -1641,16 +2334,59 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     shared.targetRenderHz.store(uiRenderHz, std::memory_order_relaxed);
                 if (ImGui::SliderFloat("Network Hz", &uiNetHz, 0.0f, 120.0f, "%.0f"))
                     shared.targetNetworkHz.store(uiNetHz, std::memory_order_relaxed);
-                if (ImGui::SliderFloat("Sim Hz", &uiSimHz, 0.0f, 500.0f, "%.0f"))
+                if (ImGui::SliderFloat("Sim Hz", &uiSimHz, 0.0f, 2000.0f, "%.0f"))
+                {
                     shared.targetSimHz.store(uiSimHz, std::memory_order_relaxed);
+                    if (uiSimHz > 0.0f)
+                        shared.fixedDt.store(1.0f / uiSimHz, std::memory_order_relaxed);
+                }
+                if (ImGui::SliderFloat("Snapshot Send Hz", &uiSnapshotHz, 0.0f, 2000.0f, "%.0f"))
+                {
+                    const float minSnapshotHz = std::max(1.0f, shared.targetNetworkHz.load(std::memory_order_relaxed));
+                    if (uiSnapshotHz > 0.0f && uiSnapshotHz < minSnapshotHz)
+                        uiSnapshotHz = minSnapshotHz;
+                    shared.snapshotSendHz.store(uiSnapshotHz, std::memory_order_relaxed);
+                }
+                ImGui::Text("Snapshot mode: %s",
+                    uiSnapshotHz <= 0.0f
+                    ? "every fresh simulation tick"
+                    : "rate limited, minimum network tick rate");
 
-                ImGui::TextDisabled("(0 = uncapped)");
+                ImGui::TextDisabled("(0 = uncapped; snapshots at 0 = every fresh sim tick)");
                 ImGui::Separator();
 
                 ImGui::SeparatorText("Measured Frequencies");
                 ImGui::Text("Render  : %6.1f Hz", displayRenderHz);
                 ImGui::Text("Network : %6.1f Hz", displayNetHz);
+                ImGui::Text("Net send: %6.1f Hz", shared.measuredNetworkSendHz.load(std::memory_order_relaxed));
+                ImGui::Text("Net recv: %6.1f Hz", shared.measuredNetworkRecvHz.load(std::memory_order_relaxed));
                 ImGui::Text("Sim     : %6.1f Hz", displaySimHz);
+                ImGui::Text("Sim loop: %6.1f Hz", shared.measuredSimLoopHz.load(std::memory_order_relaxed));
+                ImGui::Separator();
+
+                ImGui::SeparatorText("Simulation Tick Timings");
+                {
+                    SimTimingStats timingStats{};
+                    {
+                        std::lock_guard<std::mutex> lk(shared.simTimingMutex);
+                        timingStats = shared.simTiming;
+                    }
+
+                    ImGui::Text("Scenario/spawners  avg %.3f ms  max %.3f ms",
+                        timingStats.scenarioMsAvg, timingStats.scenarioMsMax);
+                    ImGui::Text("Physics update     avg %.3f ms  max %.3f ms",
+                        timingStats.physicsMsAvg, timingStats.physicsMsMax);
+                    ImGui::Text("Collision update   avg %.3f ms  max %.3f ms",
+                        timingStats.collisionMsAvg, timingStats.collisionMsMax);
+                    ImGui::Text("Network state gen  avg %.3f ms  max %.3f ms",
+                        timingStats.netStateMsAvg, timingStats.netStateMsMax);
+                    ImGui::Text("Render snapshot    avg %.3f ms  max %.3f ms",
+                        timingStats.renderSnapshotMsAvg, timingStats.renderSnapshotMsMax);
+                    ImGui::Text("Shared lock wait   avg %.3f ms  max %.3f ms",
+                        timingStats.lockMsAvg, timingStats.lockMsMax);
+                    ImGui::Text("Outer sim loop     avg %.3f ms  max %.3f ms",
+                        timingStats.simLoopMsAvg, timingStats.simLoopMsMax);
+                }
                 ImGui::Separator();
 
                 ImGui::SeparatorText("Replica Smoothing");
@@ -1670,6 +2406,10 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     float correctionThreshold = shared.replicaCorrectionThreshold.load(std::memory_order_relaxed);
                     if (ImGui::SliderFloat("Large Error Threshold (m)", &correctionThreshold, 0.1f, 3.0f, "%.2f"))
                         shared.replicaCorrectionThreshold.store(correctionThreshold, std::memory_order_relaxed);
+
+                    float correctionStrength = shared.replicaCorrectionStrength.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Correction Strength", &correctionStrength, 0.0f, 3.0f, "%.2f"))
+                        shared.replicaCorrectionStrength.store(correctionStrength, std::memory_order_relaxed);
                 }
                 ImGui::Separator();
 
@@ -1724,6 +2464,8 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     ImGui::Text("Snapshot packets received : %u", netStats.snapshotPacketsReceived);
                     ImGui::Text("Snapshot packets dropped  : %u", netStats.snapshotPacketsDropped);
                     ImGui::Text("Snapshot packets delayed  : %u", netStats.snapshotPacketsDelayed);
+                    ImGui::Text("Stale replica updates     : %u",
+                        shared.staleReplicaPacketsIgnored.load(std::memory_order_relaxed));
 
                     const uint32_t totalSnapshotAttempts =
                         netStats.snapshotPacketsSent + netStats.snapshotPacketsDropped;
@@ -1751,11 +2493,65 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
                 ImGui::Separator();
 
+                ImGui::SeparatorText("Peer / Object Debug");
+                ImGui::Text("Local peer/client ID       : %d", cfg.peer_id);
+                ImGui::Text("Configured remote peers    : %d", (int)cfg.RemotePeers().size());
+                for (const auto& peer : cfg.RemotePeers())
+                {
+                    ImGui::Text("Peer %d -> %s  control:%u  snapshot:%u",
+                        peer.peerId,
+                        peer.host.c_str(),
+                        (unsigned)peer.control_port,
+                        (unsigned)peer.snapshot_port);
+                }
+                {
+                    RuntimeDebugCounts counts{};
+                    {
+                        std::lock_guard<std::mutex> lk(shared.debugCountsMutex);
+                        counts = shared.debugCounts;
+                    }
+
+                    ImGui::Text("Local-owned objects        : %u", counts.localOwned);
+                    ImGui::Text("Remote-owned objects       : %u", counts.remoteOwned);
+                    ImGui::Text("Static/local objects       : %u", counts.staticObjects);
+                    ImGui::Text("Animated objects           : %u", counts.animatedObjects);
+                    ImGui::Text("Spawned objects approx     : %u", counts.spawnedObjects);
+                    ImGui::Text("Dynamic body cache         : %u", counts.dynamicBodies);
+                    ImGui::Text("Collision candidate pairs  : %u", counts.collisionCandidates);
+                    ImGui::Text("Collision contacts         : %u", counts.collisionContacts);
+                }
+
+                ImGui::Separator();
+
                 ImGui::SeparatorText("Thread / Core Mapping");
                 ImGui::Text("Available cores : %d", numCores);
                 ImGui::Text("Render  thread  -> logical core %d", shared.renderCoreAssigned);
-                ImGui::Text("Network thread  -> logical core %d", shared.netCoreAssigned);
+                ImGui::Text("Network affinity -> logical processors %d-%d",
+                    shared.netSendCoreAssigned,
+                    shared.netRecvCoreAssigned);
+                ImGui::Text("Network send    -> logical core %d (%s)",
+                    shared.netSendCoreAssigned,
+                    shared.netSendThreadRunning.load(std::memory_order_relaxed) ? "running" : "stopped");
+                ImGui::Text("Network receive -> logical core %d (%s)",
+                    shared.netRecvCoreAssigned,
+                    shared.netRecvThreadRunning.load(std::memory_order_relaxed) ? "running" : "stopped");
                 ImGui::Text("Sim     thread  -> logical core %d", shared.simCoreAssigned);
+                ImGui::Text("Sim workers     : %d", shared.simWorkerThreadCount.load(std::memory_order_relaxed));
+                {
+                    std::vector<int> simCores;
+                    {
+                        std::lock_guard<std::mutex> lk(shared.simWorkerCoresMutex);
+                        simCores = shared.simWorkerCores;
+                    }
+
+                    std::ostringstream oss;
+                    for (size_t i = 0; i < simCores.size(); ++i)
+                    {
+                        if (i > 0) oss << ", ";
+                        oss << simCores[i];
+                    }
+                    ImGui::Text("Sim core range  -> logical core(s) %s", oss.str().c_str());
+                }
                 ImGui::Separator();
 
                 if (snap)
@@ -1791,7 +2587,10 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     shared.appRunning.store(false, std::memory_order_relaxed);
 
     if (simThread.joinable()) simThread.join();
-    if (netThread.joinable()) netThread.join();
+    if (netReceiveThread.joinable()) netReceiveThread.join();
+    if (netSendThread.joinable()) netSendThread.join();
+    if (networkReady)
+        networkRuntime.net.Shutdown();
 
     return 0;
 }

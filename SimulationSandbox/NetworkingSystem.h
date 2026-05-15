@@ -45,6 +45,8 @@ namespace Net
         void Shutdown();
         NetworkStats GetStats() const;
         void Update(float dt);
+        void UpdateReceive(float dt);
+        void UpdateSend(float dt);
 
         // ------------------------------------------------------------
         // Global commands (reliable)

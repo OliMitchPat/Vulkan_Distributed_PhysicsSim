@@ -261,16 +261,26 @@ namespace Net
 
     void NetworkingSystem::Update(float dt)
     {
+        UpdateReceive(dt);
+        UpdateSend(dt);
+    }
+
+    void NetworkingSystem::UpdateReceive(float dt)
+    {
+        ReceiveControlPacketsFully();
+        ReceiveSnapshotPacketsWithBudget();
+        DeliverDelayedIncomingSnapshotsIfStillUsed(dt);
+    }
+
+    void NetworkingSystem::UpdateSend(float dt)
+    {
         if (m_snapshotPauseSeconds > 0.0f)
         {
             m_snapshotPauseSeconds = std::max(0.0f, m_snapshotPauseSeconds - dt);
         }
 
-        ReceiveControlPacketsFully();
         UpdateReliableResendsOnControlSocket(dt);
-        ReceiveSnapshotPacketsWithBudget();
         DeliverDelayedOutgoingSnapshotsWithBudget(dt);
-        DeliverDelayedIncomingSnapshotsIfStillUsed(dt);
     }
 
     // ============================================================

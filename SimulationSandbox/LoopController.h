@@ -16,8 +16,9 @@
  *   thread.  beginFrame() / endFrame() must be called from the owning thread.
  *
  * Rate limiting:
- *   endFrame() sleeps most of the remaining budget, then spin-yields for the
- *   final sub-millisecond to improve accuracy without burning 100% CPU.
+ *   endFrame() sleeps most of the remaining budget, then busy-spins for the
+ *   final short slice. At high target rates, yielding can overshoot by a whole
+ *   scheduler quantum and halve the measured Hz.
  *   If targetHz is 0 the loop runs uncapped.
  */
 
@@ -80,7 +81,7 @@ public:
     }
 
     // Call at the END of the loop body (after work is done).
-    // Sleeps + spin-yields so that the loop runs at targetHz.
+    // Sleeps + spins so that the loop runs at targetHz.
     // If targetHz <= 0, returns immediately (uncapped).
     void endFrame()
     {
@@ -92,18 +93,25 @@ public:
 
         double targetPeriod = 1.0 / static_cast<double>(hz);
 
-        // Sleep for most of the remaining budget (leave 1 ms for spin)
+        // Sleep for most of the remaining budget. At high rates the whole
+        // period can be only 1-2 ms, and Windows sleep_for can overshoot by
+        // enough to cap a 1000 Hz loop around 500 Hz. For those rates, spin
+        // through the full wait instead.
         double elapsed = Dsec(Clock::now() - m_frameStart).count();
-        double toSleep  = targetPeriod - elapsed - 0.001;
-        if (toSleep > 0.0)
+        if (hz < 500.0f)
         {
-            std::this_thread::sleep_for(Dsec(toSleep));
+            constexpr double spinWindow = 0.001;
+            double toSleep = targetPeriod - elapsed - spinWindow;
+            if (toSleep > 0.0)
+            {
+                std::this_thread::sleep_for(Dsec(toSleep));
+            }
         }
 
-        // Spin-yield for sub-millisecond accuracy
+        // Busy-spin for the final short slice. Do not call yield() here:
+        // on Windows it can hand away the CPU long enough to miss 1000 Hz.
         while (Dsec(Clock::now() - m_frameStart).count() < targetPeriod)
         {
-            std::this_thread::yield();
         }
     }
 

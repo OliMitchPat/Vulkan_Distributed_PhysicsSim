@@ -27,11 +27,18 @@ public:
         m_contacts.clear();
         m_solids.clear();
         m_containers.clear();
+        m_lastSolidCount = 0;
+        m_lastContainerCount = 0;
+        m_lastCandidatePairs = 0;
+        m_lastContacts = 0;
 
         GatherShapes(world);
+        m_lastSolidCount = static_cast<uint32_t>(m_solids.size());
+        m_lastContainerCount = static_cast<uint32_t>(m_containers.size());
 
         TestSolidSolid();
         TestSolidContainer();
+        m_lastContacts = static_cast<uint32_t>(m_contacts.size());
 
         const int velocityIterations = 8;
 
@@ -71,6 +78,11 @@ public:
             });
     }
 
+    uint32_t LastSolidCount() const { return m_lastSolidCount; }
+    uint32_t LastContainerCount() const { return m_lastContainerCount; }
+    uint32_t LastCandidatePairs() const { return m_lastCandidatePairs; }
+    uint32_t LastContactCount() const { return m_lastContacts; }
+
 private:
     struct BodyRef
     {
@@ -78,6 +90,7 @@ private:
         float restitution = 0.5f;
         float staticFriction = 0.5f;
         float dynamicFriction = 0.3f;
+        bool dynamic = false;
     };
 
     enum class ShapeKind { Sphere, Plane, Capsule, Cylinder, OBB };
@@ -125,6 +138,10 @@ private:
 
     std::vector<AnyShape> m_solids;
     std::vector<AnyShape> m_containers;
+    uint32_t m_lastSolidCount = 0;
+    uint32_t m_lastContainerCount = 0;
+    uint32_t m_lastCandidatePairs = 0;
+    uint32_t m_lastContacts = 0;
 
     struct Contact
     {
@@ -173,6 +190,7 @@ private:
         br.restitution = phys.restitution;
         br.staticFriction = phys.staticFriction;
         br.dynamicFriction = phys.dynamicFriction;
+        br.dynamic = phys.body.IsDynamic();
         return br;
     }
 
@@ -345,6 +363,10 @@ private:
         {
             for (std::size_t j = i + 1; j < m_solids.size(); ++j)
             {
+                if (!m_solids[i].br.dynamic && !m_solids[j].br.dynamic)
+                    continue;
+
+                ++m_lastCandidatePairs;
                 PushContact(m_solids[i], m_solids[j], IntersectSolids(m_solids[i], m_solids[j]));
             }
         }
@@ -354,8 +376,12 @@ private:
     {
         for (auto& solid : m_solids)
         {
+            if (!solid.br.dynamic)
+                continue;
+
             for (auto& container : m_containers)
             {
+                ++m_lastCandidatePairs;
                 PushContact(solid, container, ContainInContainer(solid, container));
             }
         }

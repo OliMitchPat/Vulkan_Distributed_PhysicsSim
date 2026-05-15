@@ -31,6 +31,7 @@ public:
     void Update(World& world, float dt, uint32_t currentSceneGeneration) override;
 
     void SetLocalPeerId(int peerId);
+    size_t PendingSpawnCount() const { return m_pendingSpawnEvents.size(); }
     bool PopPendingSpawn(Net::SpawnObjectPayload& outPayload);
     bool SpawnFromNetworkEvent(World& world, const Net::SpawnObjectPayload& payload);
 
@@ -48,6 +49,7 @@ private:
     bool        m_gravityOn = true;
     int         m_localPeerId = 1; // 1..4
     float       m_spawnerElapsedSec = 0.0f;
+    float       m_nextSpawnerWakeSec = 0.0f;
     std::vector<SpawnerRuntime> m_spawnerRuntime;
     std::vector<Net::SpawnObjectPayload> m_pendingSpawnEvents;
 

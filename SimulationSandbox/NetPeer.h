@@ -23,11 +23,13 @@ namespace Net
     {
         int peerId = 0;
 
-        sockaddr_storage addr{};
-        int addrLen = 0;
+        sockaddr_storage controlAddr{};
+        int controlAddrLen = 0;
+
+        sockaddr_storage snapshotAddr{};
+        int snapshotAddrLen = 0;
 
         uint32_t nextSeq = 1;
-        uint32_t lastReceivedSeq = 0;
         std::unordered_set<uint32_t> receivedReliableSeqs;
         std::deque<uint32_t> receivedReliableSeqOrder;
         std::vector<PendingMessage> resendQueue;

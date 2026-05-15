@@ -1717,6 +1717,9 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                         netStats = shared.netStats;
                     }
 
+                    ImGui::Text("Control port              : %u", (unsigned)cfg.control_bind_port);
+                    ImGui::Text("Snapshot port             : %u", (unsigned)cfg.snapshot_bind_port);
+                    ImGui::Text("Control packets received  : %u", netStats.controlPacketsReceived);
                     ImGui::Text("Snapshot packets sent     : %u", netStats.snapshotPacketsSent);
                     ImGui::Text("Snapshot packets received : %u", netStats.snapshotPacketsReceived);
                     ImGui::Text("Snapshot packets dropped  : %u", netStats.snapshotPacketsDropped);
@@ -1736,6 +1739,9 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
                     ImGui::Text("Global commands sent      : %u", netStats.globalCommandsSent);
                     ImGui::Text("Global commands received  : %u", netStats.globalCommandsReceived);
+                    ImGui::Text("Spawn packets sent        : %u", netStats.spawnPacketsSent);
+                    ImGui::Text("Spawn packets received    : %u", netStats.spawnPacketsReceived);
+                    ImGui::Text("Reliable resends          : %u", netStats.reliableResends);
 
                     ImGui::Separator();
 

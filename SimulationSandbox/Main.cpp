@@ -20,14 +20,17 @@ static void PrintConfigSummary(const Net::PeerConfig& cfg)
 {
     std::cout << "=== Peer Configuration ===\n";
     std::cout << "  My peer id  : " << cfg.peer_id << "\n";
-    std::cout << "  Bind address: " << cfg.bind_ip << ":" << cfg.bind_port << "\n";
+    std::cout << "  Control bind : " << cfg.bind_ip << ":" << cfg.control_bind_port << "\n";
+    std::cout << "  Snapshot bind: " << cfg.bind_ip << ":" << cfg.snapshot_bind_port << "\n";
     std::cout << "  Loop Hz     : render=" << cfg.render_hz
               << "  network=" << cfg.network_hz
               << "  simulation=" << cfg.simulation_hz << "\n";
     std::cout << "  Peers (" << cfg.peers.size() << "):\n";
     for (const auto& p : cfg.peers)
     {
-        std::cout << "    [" << p.peerId << "] " << p.host << ":" << p.port;
+        std::cout << "    [" << p.peerId << "] " << p.host
+            << "  control=" << p.control_port
+            << " snapshot=" << p.snapshot_port;
         if (p.peerId == cfg.peer_id)
             std::cout << "  <-- self";
         std::cout << "\n";
@@ -72,17 +75,22 @@ int main(int argc, char* argv[])
     // ---- Resolve peer addresses (scaffolding — sockets created later) ----
     for (const auto& peer : cfg.peers)
     {
-        sockaddr_storage addr{};
+        sockaddr_storage controlAddr{};
+        sockaddr_storage snapshotAddr{};
         std::string      resolveError;
-        if (Net::ResolveAddress(peer.host, peer.port, addr, resolveError))
+        if (Net::ResolveAddress(peer.host, peer.control_port, controlAddr, resolveError) &&
+            Net::ResolveAddress(peer.host, peer.snapshot_port, snapshotAddr, resolveError))
         {
             std::cout << "  Resolved peer " << peer.peerId
-                      << " -> " << Net::AddressToString(addr) << "\n";
+                      << " -> control " << Net::AddressToString(controlAddr)
+                      << "  snapshot " << Net::AddressToString(snapshotAddr) << "\n";
         }
         else
         {
             std::cerr << "  Warning: could not resolve peer " << peer.peerId
-                      << " (" << peer.host << ":" << peer.port
+                      << " (" << peer.host
+                      << " control=" << peer.control_port
+                      << " snapshot=" << peer.snapshot_port
                       << "): " << resolveError << "\n";
         }
     }
@@ -131,4 +139,3 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 }
-

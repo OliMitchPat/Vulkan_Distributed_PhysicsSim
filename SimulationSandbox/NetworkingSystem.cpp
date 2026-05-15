@@ -9,6 +9,11 @@
 
 namespace Net
 {
+    constexpr int MAX_CONTROL_PACKETS_PER_UPDATE = 256;
+    constexpr int MAX_SNAPSHOT_PACKETS_PER_UPDATE = 64;
+    constexpr int MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE = 32;
+    constexpr size_t MAX_DELAYED_OUTGOING_SNAPSHOTS = 256;
+
     // ============================================================
     // Endpoint comparison + peer lookup helpers
     // ============================================================
@@ -36,12 +41,23 @@ namespace Net
         return false;
     }
 
-    static Peer* FindPeerByAddr(std::vector<Peer>& peers, const sockaddr_storage& from)
+    static Peer* FindPeerByControlAddr(std::vector<Peer>& peers, const sockaddr_storage& from)
     {
         for (auto& p : peers)
         {
-            if (p.addrLen == 0) continue;
-            if (SockAddrEqualEndpoint(from, p.addr))
+            if (p.controlAddrLen == 0) continue;
+            if (SockAddrEqualEndpoint(from, p.controlAddr))
+                return &p;
+        }
+        return nullptr;
+    }
+
+    static Peer* FindPeerBySnapshotAddr(std::vector<Peer>& peers, const sockaddr_storage& from)
+    {
+        for (auto& p : peers)
+        {
+            if (p.snapshotAddrLen == 0) continue;
+            if (SockAddrEqualEndpoint(from, p.snapshotAddr))
                 return &p;
         }
         return nullptr;
@@ -114,7 +130,7 @@ namespace Net
         ack.peerId = (uint8_t)localPeerId;
         ack.ack = seq;
 
-        socket.Send(peer.addr, peer.addrLen, &ack, (int)sizeof(ack));
+        socket.Send(peer.controlAddr, peer.controlAddrLen, &ack, (int)sizeof(ack));
     }
 
     // ============================================================
@@ -133,7 +149,7 @@ namespace Net
         bool highPriority = false)
     {
         // Always send immediately once.
-        socket.Send(peer.addr, peer.addrLen, data, size);
+        socket.Send(peer.controlAddr, peer.controlAddrLen, data, size);
 
         PendingMessage msg;
         msg.data.assign(
@@ -157,9 +173,17 @@ namespace Net
     bool NetworkingSystem::Init(const PeerConfig& cfg)
     {
         std::string err;
-        if (!m_socket.Open(cfg.bind_ip, cfg.bind_port, err))
+        if (!m_controlSocket.Open(cfg.bind_ip, cfg.control_bind_port, err))
         {
-            std::cout << "Socket error: " << err << "\n";
+            std::cout << "Control socket error: " << err << "\n";
+            return false;
+        }
+
+        err.clear();
+        if (!m_snapshotSocket.Open(cfg.bind_ip, cfg.snapshot_bind_port, err))
+        {
+            std::cout << "Snapshot socket error: " << err << "\n";
+            m_controlSocket.Close();
             return false;
         }
 
@@ -172,19 +196,28 @@ namespace Net
             if (p.peerId == cfg.peer_id)
                 continue;
 
-            sockaddr_storage addr{};
+            sockaddr_storage controlAddr{};
+            sockaddr_storage snapshotAddr{};
             std::string err2;
 
-            if (!ResolveAddress(p.host, p.port, addr, err2))
+            if (!ResolveAddress(p.host, p.control_port, controlAddr, err2))
             {
-                std::cout << "Resolve failed: " << err2 << "\n";
+                std::cout << "Resolve control failed: " << err2 << "\n";
+                continue;
+            }
+
+            if (!ResolveAddress(p.host, p.snapshot_port, snapshotAddr, err2))
+            {
+                std::cout << "Resolve snapshot failed: " << err2 << "\n";
                 continue;
             }
 
             Peer peer;
             peer.peerId = p.peerId;
-            peer.addr = addr;
-            peer.addrLen = Net::SockaddrLen(addr);
+            peer.controlAddr = controlAddr;
+            peer.controlAddrLen = Net::SockaddrLen(controlAddr);
+            peer.snapshotAddr = snapshotAddr;
+            peer.snapshotAddrLen = Net::SockaddrLen(snapshotAddr);
 
             m_peers.push_back(std::move(peer));
         }
@@ -195,7 +228,8 @@ namespace Net
 
     void NetworkingSystem::Shutdown()
     {
-        m_socket.Close();
+        m_controlSocket.Close();
+        m_snapshotSocket.Close();
     }
 
     // ============================================================
@@ -209,7 +243,7 @@ namespace Net
         msg.peerId = (uint8_t)m_localPeerId;
 
         for (auto& p : m_peers)
-            m_socket.Send(p.addr, p.addrLen, &msg, (int)sizeof(msg));
+            m_controlSocket.Send(p.controlAddr, p.controlAddrLen, &msg, (int)sizeof(msg));
     }
 
     // ============================================================
@@ -232,16 +266,34 @@ namespace Net
             m_snapshotPauseSeconds = std::max(0.0f, m_snapshotPauseSeconds - dt);
         }
 
-        // ---- Receive loop first ----
+        ReceiveControlPacketsFully();
+        UpdateReliableResendsOnControlSocket(dt);
+        ReceiveSnapshotPacketsWithBudget();
+        DeliverDelayedOutgoingSnapshotsWithBudget(dt);
+        DeliverDelayedIncomingSnapshotsIfStillUsed(dt);
+    }
+
+    // ============================================================
+    // Handle incoming packet
+    // ============================================================
+
+    void NetworkingSystem::ReceiveControlPacketsFully()
+    {
         sockaddr_storage from{};
-
         int size = 0;
-        while ((size = m_socket.Receive(from, m_recvBuffer, (int)sizeof(m_recvBuffer))) > 0)
+        int processed = 0;
+        while ((size = m_controlSocket.Receive(from, m_recvBuffer, (int)sizeof(m_recvBuffer))) > 0)
         {
-            HandlePacket(from, m_recvBuffer, size);
+            ++m_stats.controlPacketsReceived;
+            HandlePacket(from, m_recvBuffer, size, PacketChannel::Control);
+            ++processed;
+            if (processed >= MAX_CONTROL_PACKETS_PER_UPDATE)
+                break;
         }
+    }
 
-        // ---- Resend reliable messages ----
+    void NetworkingSystem::UpdateReliableResendsOnControlSocket(float dt)
+    {
         constexpr float RESEND_INTERVAL_SEC = 0.05f;
         constexpr int   MAX_RETRIES = 10;
 
@@ -260,12 +312,13 @@ namespace Net
                         continue;
                     }
 
-                    m_socket.Send(
-                        peer.addr,
-                        peer.addrLen,
+                    m_controlSocket.Send(
+                        peer.controlAddr,
+                        peer.controlAddrLen,
                         msg.data.data(),
                         (int)msg.data.size());
 
+                    ++m_stats.reliableResends;
                     msg.timer = 0.0f;
                     msg.retries++;
                 }
@@ -273,52 +326,60 @@ namespace Net
                 ++i;
             }
         }
+    }
 
-        // ---- Deliver delayed outgoing snapshot packets ----
-        //
-        // Snapshots are low priority. During scene/global transitions, discard
-        // queued snapshots because they are either stale or not worth delaying
-        // control traffic for.
+    void NetworkingSystem::ReceiveSnapshotPacketsWithBudget()
+    {
+        sockaddr_storage from{};
+        int size = 0;
+        int processed = 0;
+        while ((size = m_snapshotSocket.Receive(from, m_recvBuffer, (int)sizeof(m_recvBuffer))) > 0)
+        {
+            HandlePacket(from, m_recvBuffer, size, PacketChannel::Snapshot);
+            ++processed;
+            if (processed >= MAX_SNAPSHOT_PACKETS_PER_UPDATE)
+                break;
+        }
+    }
+
+    void NetworkingSystem::DeliverDelayedOutgoingSnapshotsWithBudget(float dt)
+    {
         if (m_snapshotPauseSeconds > 0.0f)
         {
             m_delayedOutgoingSnapshots.clear();
+            return;
         }
-        else
+
+        int sentThisUpdate = 0;
+        for (size_t i = 0; i < m_delayedOutgoingSnapshots.size();)
         {
-            constexpr int MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE = 32;
-            int sentThisUpdate = 0;
+            auto& p = m_delayedOutgoingSnapshots[i];
+            p.delaySec -= dt;
 
-            for (size_t i = 0; i < m_delayedOutgoingSnapshots.size();)
+            if (p.delaySec <= 0.0f)
             {
-                auto& p = m_delayedOutgoingSnapshots[i];
-                p.delaySec -= dt;
+                m_snapshotSocket.Send(
+                    p.addr,
+                    p.addrLen,
+                    p.payload.data(),
+                    (int)p.payload.size());
 
-                if (p.delaySec <= 0.0f)
-                {
-                    m_socket.Send(
-                        p.addr,
-                        p.addrLen,
-                        p.payload.data(),
-                        (int)p.payload.size());
+                m_delayedOutgoingSnapshots.erase(
+                    m_delayedOutgoingSnapshots.begin() + (int)i);
 
-                    m_delayedOutgoingSnapshots.erase(
-                        m_delayedOutgoingSnapshots.begin() + (int)i);
-
-                    ++sentThisUpdate;
-
-                    if (sentThisUpdate >= MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE)
-                        break;
-
-                    continue;
-                }
-
-                ++i;
+                ++sentThisUpdate;
+                if (sentThisUpdate >= MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE)
+                    break;
+                continue;
             }
-        }
 
-        // If you no longer use delayed incoming snapshots because impairment is
-        // outgoing-only, this vector should normally remain empty. Keep this
-        // small delivery path for safety/backwards compatibility.
+            ++i;
+        }
+    }
+
+    void NetworkingSystem::DeliverDelayedIncomingSnapshotsIfStillUsed(float dt)
+    {
+        int delivered = 0;
         for (size_t i = 0; i < m_delayedIncomingSnapshots.size();)
         {
             auto& p = m_delayedIncomingSnapshots[i];
@@ -334,6 +395,9 @@ namespace Net
                 m_delayedIncomingSnapshots.erase(
                     m_delayedIncomingSnapshots.begin() + (int)i);
 
+                ++delivered;
+                if (delivered >= MAX_SNAPSHOT_PACKETS_PER_UPDATE)
+                    break;
                 continue;
             }
 
@@ -341,11 +405,11 @@ namespace Net
         }
     }
 
-    // ============================================================
-    // Handle incoming packet
-    // ============================================================
-
-    void NetworkingSystem::HandlePacket(const sockaddr_storage& from, const char* data, int size)
+    void NetworkingSystem::HandlePacket(
+        const sockaddr_storage& from,
+        const char* data,
+        int size,
+        PacketChannel channel)
     {
         if (size < (int)sizeof(MsgHeader))
             return;
@@ -358,19 +422,37 @@ namespace Net
         if (hdr->peerId == 0)
             return;
 
-        Peer* peer = FindPeerByAddr(m_peers, from);
+        Peer* peer = nullptr;
+        if (channel == PacketChannel::Control)
+            peer = FindPeerByControlAddr(m_peers, from);
+        else
+            peer = FindPeerBySnapshotAddr(m_peers, from);
+
         if (!peer)
         {
             peer = FindPeerById(m_peers, (int)hdr->peerId);
             if (!peer)
                 return;
 
-            // Learn sender endpoint so future ACKs/resends go to the right place.
-            peer->addr = from;
-            peer->addrLen = Net::SockaddrLen(from);
+            if (channel == PacketChannel::Control)
+            {
+                peer->controlAddr = from;
+                peer->controlAddrLen = Net::SockaddrLen(from);
+            }
+            else
+            {
+                peer->snapshotAddr = from;
+                peer->snapshotAddrLen = Net::SockaddrLen(from);
+            }
         }
 
-        switch ((MsgType)hdr->msgType)
+        const MsgType msgType = (MsgType)hdr->msgType;
+        if (channel == PacketChannel::Control && msgType == MsgType::STATE_SNAPSHOT)
+            return;
+        if (channel == PacketChannel::Snapshot && msgType != MsgType::STATE_SNAPSHOT)
+            return;
+
+        switch (msgType)
         {
         case MsgType::HELLO:
         {
@@ -381,7 +463,7 @@ namespace Net
             reply.peerId = (uint8_t)m_localPeerId;
             reply.seq = peer->nextSeq++;
 
-            m_socket.Send(peer->addr, peer->addrLen, &reply, (int)sizeof(reply));
+            m_controlSocket.Send(peer->controlAddr, peer->controlAddrLen, &reply, (int)sizeof(reply));
             break;
         }
 
@@ -413,7 +495,7 @@ namespace Net
         case MsgType::GLOBAL_COMMAND:
         {
             // Reliable channel: always ACK, including duplicates.
-            SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
+            SendAck(m_controlSocket, *peer, m_localPeerId, hdr->seq);
 
             if (size < (int)sizeof(MsgHeader) + (int)sizeof(GlobalCommandPayload))
                 break;
@@ -517,7 +599,7 @@ namespace Net
         case MsgType::SPAWN_OBJECT:
         {
             // Reliable channel: always ACK, including duplicates.
-            SendAck(m_socket, *peer, m_localPeerId, hdr->seq);
+            SendAck(m_controlSocket, *peer, m_localPeerId, hdr->seq);
 
             if (size < (int)sizeof(MsgHeader) + (int)sizeof(SpawnObjectPayload))
                 break;
@@ -541,6 +623,7 @@ namespace Net
             }
 
             m_pendingSpawnObjects.push_back(*payload);
+            ++m_stats.spawnPacketsReceived;
 
             break;
         }
@@ -614,7 +697,7 @@ namespace Net
             std::memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
 
             SendReliable(
-                m_socket,
+                m_controlSocket,
                 peer,
                 buffer,
                 (int)(sizeof(hdr) + sizeof(payload)),
@@ -642,11 +725,12 @@ namespace Net
             std::memcpy(buffer + sizeof(hdr), &payload, sizeof(payload));
 
             SendReliable(
-                m_socket,
+                m_controlSocket,
                 peer,
                 buffer,
                 (int)(sizeof(hdr) + sizeof(payload)),
                 false);
+            ++m_stats.spawnPacketsSent;
         }
     }
 
@@ -810,9 +894,15 @@ namespace Net
 
                 if (delaySec > 0.0f)
                 {
+                    if (m_delayedOutgoingSnapshots.size() >= MAX_DELAYED_OUTGOING_SNAPSHOTS)
+                    {
+                        ++m_stats.snapshotPacketsDropped;
+                        continue;
+                    }
+
                     DelayedOutgoingSnapshot delayed{};
-                    delayed.addr = peer.addr;
-                    delayed.addrLen = peer.addrLen;
+                    delayed.addr = peer.snapshotAddr;
+                    delayed.addrLen = peer.snapshotAddrLen;
                     delayed.payload.assign(buffer, buffer + bytes);
                     delayed.delaySec = delaySec;
 
@@ -822,7 +912,7 @@ namespace Net
                 }
                 else
                 {
-                    m_socket.Send(peer.addr, peer.addrLen, buffer, bytes);
+                    m_snapshotSocket.Send(peer.snapshotAddr, peer.snapshotAddrLen, buffer, bytes);
                 }
 
                 ++m_stats.snapshotPacketsSent;

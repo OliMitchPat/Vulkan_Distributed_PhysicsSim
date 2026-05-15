@@ -14,13 +14,17 @@ namespace Net
 {
     struct NetworkStats
     {
+        uint32_t controlPacketsReceived = 0;
         uint32_t snapshotPacketsSent = 0;
         uint32_t snapshotPacketsReceived = 0;
         uint32_t snapshotPacketsDropped = 0;
         uint32_t snapshotPacketsDelayed = 0;
+        uint32_t reliableResends = 0;
 
         uint32_t globalCommandsSent = 0;
         uint32_t globalCommandsReceived = 0;
+        uint32_t spawnPacketsSent = 0;
+        uint32_t spawnPacketsReceived = 0;
 
         uint32_t delayedOutgoingSnapshotPackets = 0;
         uint32_t delayedIncomingSnapshotPackets = 0;
@@ -77,8 +81,19 @@ namespace Net
         uint32_t m_currentSceneGeneration = 1;
 
     private:
+        enum class PacketChannel
+        {
+            Control,
+            Snapshot
+        };
+
         void SendHello();
-        void HandlePacket(const sockaddr_storage& from, const char* data, int size);
+        void HandlePacket(const sockaddr_storage& from, const char* data, int size, PacketChannel channel);
+        void ReceiveControlPacketsFully();
+        void UpdateReliableResendsOnControlSocket(float dt);
+        void ReceiveSnapshotPacketsWithBudget();
+        void DeliverDelayedOutgoingSnapshotsWithBudget(float dt);
+        void DeliverDelayedIncomingSnapshotsIfStillUsed(float dt);
 
         void SendGlobalCommand(const GlobalCommandPayload& payload);
         bool ShouldDropSnapshotPacket() const;
@@ -101,7 +116,8 @@ namespace Net
             float delaySec = 0.0f;
         };
 
-        UdpSocket m_socket;
+        UdpSocket m_controlSocket;
+        UdpSocket m_snapshotSocket;
 
         int m_localPeerId = 0;
         std::vector<Peer> m_peers;
@@ -133,6 +149,6 @@ namespace Net
         uint32_t m_snapshotSendCursor = 0;
 
         // Keep this small enough that control messages are never starved.
-        uint32_t m_maxSnapshotPacketsPerSend = 16;
+        uint32_t m_maxSnapshotPacketsPerSend = 8;
     };
 }

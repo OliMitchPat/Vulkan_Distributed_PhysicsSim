@@ -219,6 +219,32 @@ struct VelocityComponent
 };
 
 // --------------------------------------------------
+// FlockingComponent
+// --------------------------------------------------
+//
+// Steering/boid data for agents controlled by FlockingSystem.
+// These agents are intentionally not integrated by PhysicsSystem.
+//
+struct FlockingComponent
+{
+    bool enabled = true;
+    bool debugEnabled = false;
+    int flockId = 0;
+
+    float maxSpeed = 8.0f;
+    float maxForce = 15.0f;
+    float perceptionRadius = 6.0f;
+    float separationRadius = 1.5f;
+
+    float cohesionWeight = 0.8f;
+    float alignmentWeight = 1.0f;
+    float separationWeight = 1.5f;
+    float avoidanceWeight = 2.5f;
+
+    float boidRadius = 0.2f;
+};
+
+// --------------------------------------------------
 // RenderMeshComponent
 // --------------------------------------------------
 //

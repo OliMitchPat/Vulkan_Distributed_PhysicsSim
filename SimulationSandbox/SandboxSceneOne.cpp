@@ -26,8 +26,10 @@
 
 #include "Scenario_PrimitiveScene.h"
 #include "Scenario_FlatbufferScene.h"
+#include "Scenario_FlockingDemo.h"
 #include "PhysicsSystem.h"
 #include "CollisionSystem.h"
+#include "FlockingSystem.h"
 
 #include "PeerConfig.h"
 #include "WorldSnapshot.h"
@@ -391,6 +393,24 @@ struct SimSharedState
     Net::NetworkStats netStats{};
     std::mutex simTimingMutex;
     SimTimingStats simTiming{};
+    std::mutex flockingStatsMutex;
+    FlockingStats flockingStats{};
+    std::atomic<bool> flockingEnabled{ true };
+    std::atomic<bool> flockingDebugEnabled{ false };
+    std::atomic<bool> flockingBoundsEnabled{ true };
+    std::atomic<bool> flockingUseUiSettings{ true };
+    std::atomic<float> flockingMaxSpeed{ 8.0f };
+    std::atomic<float> flockingMaxForce{ 15.0f };
+    std::atomic<float> flockingPerceptionRadius{ 6.0f };
+    std::atomic<float> flockingSeparationRadius{ 1.5f };
+    std::atomic<float> flockingCohesionWeight{ 0.8f };
+    std::atomic<float> flockingAlignmentWeight{ 1.0f };
+    std::atomic<float> flockingSeparationWeight{ 1.5f };
+    std::atomic<float> flockingAvoidanceWeight{ 2.5f };
+    std::atomic<int> flockingDebugAgentCount{ 0 };
+    std::atomic<int> flockingSearchMode{ static_cast<int>(FlockingNeighbourSearchMode::BruteForce) };
+    std::atomic<int> flockingDemoBoidCount{ 100 };
+    std::atomic<bool> flockingDemoRebuildRequested{ false };
     std::mutex debugCountsMutex;
     RuntimeDebugCounts debugCounts{};
     // Core indices actually assigned (for UI display)
@@ -740,6 +760,44 @@ static RuntimeDebugCounts BuildRuntimeDebugCounts(
     return counts;
 }
 
+static void ApplyFlockingUiSettings(World& world, const SimSharedState& shared)
+{
+    if (!shared.flockingUseUiSettings.load(std::memory_order_relaxed))
+        return;
+
+    const float maxSpeed = shared.flockingMaxSpeed.load(std::memory_order_relaxed);
+    const float maxForce = shared.flockingMaxForce.load(std::memory_order_relaxed);
+    const float perceptionRadius = shared.flockingPerceptionRadius.load(std::memory_order_relaxed);
+    const float separationRadius = shared.flockingSeparationRadius.load(std::memory_order_relaxed);
+    const float cohesionWeight = shared.flockingCohesionWeight.load(std::memory_order_relaxed);
+    const float alignmentWeight = shared.flockingAlignmentWeight.load(std::memory_order_relaxed);
+    const float separationWeight = shared.flockingSeparationWeight.load(std::memory_order_relaxed);
+    const float avoidanceWeight = shared.flockingAvoidanceWeight.load(std::memory_order_relaxed);
+
+    world.forEach<FlockingComponent>([&](Entity, FlockingComponent& flock)
+        {
+            flock.maxSpeed = maxSpeed;
+            flock.maxForce = maxForce;
+            flock.perceptionRadius = perceptionRadius;
+            flock.separationRadius = separationRadius;
+            flock.cohesionWeight = cohesionWeight;
+            flock.alignmentWeight = alignmentWeight;
+            flock.separationWeight = separationWeight;
+            flock.avoidanceWeight = avoidanceWeight;
+        });
+}
+
+static const char* FlockingSearchModeName(FlockingNeighbourSearchMode mode)
+{
+    switch (mode)
+    {
+    case FlockingNeighbourSearchMode::UniformGrid: return "Uniform Grid";
+    case FlockingNeighbourSearchMode::Octree: return "Octree";
+    case FlockingNeighbourSearchMode::BruteForce:
+    default: return "Brute Force";
+    }
+}
+
 // ============================================================================
 // Snapshot builder — called by the sim thread after each tick
 // ============================================================================
@@ -948,7 +1006,9 @@ static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
 static void SimulationThreadFunc(SimSharedState& shared, World& world,
     ScenarioManager& scenarios,
     PhysicsSystem& physicsSystem,
-    CollisionSystem& collisionSystem, int localPeerId)
+    CollisionSystem& collisionSystem,
+    FlockingSystem& flockingSystem,
+    int localPeerId)
 {
     // Affinity + name
     const int numCores = ThreadUtils::LogicalCoreCount();
@@ -958,6 +1018,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
     ThreadUtils::PinCurrentThreadToCore(assignedCore);
     ThreadUtils::SetCurrentThreadName("Sim");
     shared.simCoreAssigned = assignedCore;
+    flockingSystem.SetLocalPeerId(localPeerId);
 
     std::vector<int> simWorkerCores;
     for (int core = ThreadUtils::CORE_SIM_0; core < numCores; ++core)
@@ -1313,7 +1374,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                     const double scenarioStartSec = NowSeconds();
                     s->Update(world, fdt, currentSceneGeneration);
-                    const double physicsStartSec = NowSeconds();
+                    const double flockingStartSec = NowSeconds();
 
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
                     {
@@ -1321,12 +1382,31 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                             physicsSystem.InitializePhysicsBodies(world);
                     }
 
+                    flockingSystem.SetEnabled(shared.flockingEnabled.load(std::memory_order_relaxed));
+                    flockingSystem.SetDebugEnabled(shared.flockingDebugEnabled.load(std::memory_order_relaxed));
+                    flockingSystem.SetBoundsEnabled(shared.flockingBoundsEnabled.load(std::memory_order_relaxed));
+                    flockingSystem.SetNeighbourSearchMode(static_cast<FlockingNeighbourSearchMode>(
+                        shared.flockingSearchMode.load(std::memory_order_relaxed)));
+                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
+                    {
+                        flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
+                    }
+                    ApplyFlockingUiSettings(world, shared);
+                    flockingSystem.Update(world, fdt);
+                    {
+                        std::lock_guard<std::mutex> lk(shared.flockingStatsMutex);
+                        shared.flockingStats = flockingSystem.GetStats();
+                    }
+                    shared.flockingDebugAgentCount.store(
+                        static_cast<int>(flockingSystem.GetDebugAgents().size()),
+                        std::memory_order_relaxed);
+                    const double physicsStartSec = NowSeconds();
                     physicsSystem.Update(world, fdt);
                     const double collisionStartSec = NowSeconds();
                     collisionSystem.Update(world);
                     const double collisionEndSec = NowSeconds();
 
-                    timing.scenario.Add(TimingAccumulator::Ms(scenarioStartSec, physicsStartSec));
+                    timing.scenario.Add(TimingAccumulator::Ms(scenarioStartSec, flockingStartSec));
                     timing.physics.Add(TimingAccumulator::Ms(physicsStartSec, collisionStartSec));
             timing.collision.Add(TimingAccumulator::Ms(collisionStartSec, collisionEndSec));
 
@@ -1350,7 +1430,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                     const double scenarioStartSec = NowSeconds();
                     s->Update(world, stepDt, currentSceneGeneration);
-                    const double physicsStartSec = NowSeconds();
+                    const double flockingStartSec = NowSeconds();
 
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
                     {
@@ -1358,12 +1438,31 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                             physicsSystem.InitializePhysicsBodies(world);
                     }
 
+                    flockingSystem.SetEnabled(shared.flockingEnabled.load(std::memory_order_relaxed));
+                    flockingSystem.SetDebugEnabled(shared.flockingDebugEnabled.load(std::memory_order_relaxed));
+                    flockingSystem.SetBoundsEnabled(shared.flockingBoundsEnabled.load(std::memory_order_relaxed));
+                    flockingSystem.SetNeighbourSearchMode(static_cast<FlockingNeighbourSearchMode>(
+                        shared.flockingSearchMode.load(std::memory_order_relaxed)));
+                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
+                    {
+                        flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
+                    }
+                    ApplyFlockingUiSettings(world, shared);
+                    flockingSystem.Update(world, stepDt);
+                    {
+                        std::lock_guard<std::mutex> lk(shared.flockingStatsMutex);
+                        shared.flockingStats = flockingSystem.GetStats();
+                    }
+                    shared.flockingDebugAgentCount.store(
+                        static_cast<int>(flockingSystem.GetDebugAgents().size()),
+                        std::memory_order_relaxed);
+                    const double physicsStartSec = NowSeconds();
                     physicsSystem.Update(world, stepDt);
                     const double collisionStartSec = NowSeconds();
                     collisionSystem.Update(world);
                     const double collisionEndSec = NowSeconds();
 
-                    timing.scenario.Add(TimingAccumulator::Ms(scenarioStartSec, physicsStartSec));
+                    timing.scenario.Add(TimingAccumulator::Ms(scenarioStartSec, flockingStartSec));
                     timing.physics.Add(TimingAccumulator::Ms(physicsStartSec, collisionStartSec));
                     timing.collision.Add(TimingAccumulator::Ms(collisionStartSec, collisionEndSec));
 
@@ -1922,9 +2021,12 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     physicsSystem.SetLocalPeerId(localPeerId);
 
     CollisionSystem  collisionSystem;
+    FlockingSystem   flockingSystem;
+    flockingSystem.SetLocalPeerId(localPeerId);
     ScenarioManager  scenarios;
 
     scenarios.Add(std::make_unique<Scenario_PrimitiveScene>());
+    scenarios.Add(std::make_unique<Scenario_FlockingDemo>());
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/newtonsCradle.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/bouncingBalls.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/piston.bin"));
@@ -2012,6 +2114,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         std::ref(scenarios),
         std::ref(physicsSystem),
         std::ref(collisionSystem),
+        std::ref(flockingSystem),
         localPeerId
     );
 
@@ -2386,6 +2489,103 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                         timingStats.lockMsAvg, timingStats.lockMsMax);
                     ImGui::Text("Outer sim loop     avg %.3f ms  max %.3f ms",
                         timingStats.simLoopMsAvg, timingStats.simLoopMsMax);
+                }
+                ImGui::Separator();
+
+                ImGui::SeparatorText("Flocking");
+                {
+                    bool flockingEnabled = shared.flockingEnabled.load(std::memory_order_relaxed);
+                    if (ImGui::Checkbox("Enable Flocking", &flockingEnabled))
+                        shared.flockingEnabled.store(flockingEnabled, std::memory_order_relaxed);
+
+                    bool boundsEnabled = shared.flockingBoundsEnabled.load(std::memory_order_relaxed);
+                    if (ImGui::Checkbox("Flocking Bounds", &boundsEnabled))
+                        shared.flockingBoundsEnabled.store(boundsEnabled, std::memory_order_relaxed);
+
+                    bool debugEnabled = shared.flockingDebugEnabled.load(std::memory_order_relaxed);
+                    if (ImGui::Checkbox("Flocking Debug Data", &debugEnabled))
+                        shared.flockingDebugEnabled.store(debugEnabled, std::memory_order_relaxed);
+
+                    bool useUiSettings = shared.flockingUseUiSettings.load(std::memory_order_relaxed);
+                    if (ImGui::Checkbox("Apply UI Settings To Boids", &useUiSettings))
+                        shared.flockingUseUiSettings.store(useUiSettings, std::memory_order_relaxed);
+
+                    int demoBoidCount = shared.flockingDemoBoidCount.load(std::memory_order_relaxed);
+                    if (ImGui::SliderInt("Demo Boid Count", &demoBoidCount, 10, 2000))
+                        shared.flockingDemoBoidCount.store(demoBoidCount, std::memory_order_relaxed);
+
+                    int searchMode = shared.flockingSearchMode.load(std::memory_order_relaxed);
+                    const char* searchModeLabels[] = { "Brute Force", "Uniform Grid", "Octree" };
+                    if (ImGui::Combo("Neighbour Search", &searchMode, searchModeLabels, 3))
+                        shared.flockingSearchMode.store(searchMode, std::memory_order_relaxed);
+
+                    float maxSpeed = shared.flockingMaxSpeed.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Max Speed", &maxSpeed, 0.5f, 30.0f, "%.1f"))
+                        shared.flockingMaxSpeed.store(maxSpeed, std::memory_order_relaxed);
+
+                    float maxForce = shared.flockingMaxForce.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Max Force", &maxForce, 0.5f, 60.0f, "%.1f"))
+                        shared.flockingMaxForce.store(maxForce, std::memory_order_relaxed);
+
+                    float perceptionRadius = shared.flockingPerceptionRadius.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Perception Radius", &perceptionRadius, 0.5f, 20.0f, "%.1f"))
+                    {
+                        shared.flockingPerceptionRadius.store(perceptionRadius, std::memory_order_relaxed);
+                        float separationRadius = shared.flockingSeparationRadius.load(std::memory_order_relaxed);
+                        if (separationRadius > perceptionRadius)
+                            shared.flockingSeparationRadius.store(perceptionRadius, std::memory_order_relaxed);
+                    }
+
+                    float separationRadius = shared.flockingSeparationRadius.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Separation Radius", &separationRadius, 0.1f, 10.0f, "%.1f"))
+                    {
+                        separationRadius = std::min(separationRadius, shared.flockingPerceptionRadius.load(std::memory_order_relaxed));
+                        shared.flockingSeparationRadius.store(separationRadius, std::memory_order_relaxed);
+                    }
+
+                    ImGui::SeparatorText("Algorithm Weights");
+
+                    float avoidanceWeight = shared.flockingAvoidanceWeight.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Avoidance Weight", &avoidanceWeight, 0.0f, 8.0f, "%.2f"))
+                        shared.flockingAvoidanceWeight.store(avoidanceWeight, std::memory_order_relaxed);
+
+                    float separationWeight = shared.flockingSeparationWeight.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Separation Weight", &separationWeight, 0.0f, 8.0f, "%.2f"))
+                        shared.flockingSeparationWeight.store(separationWeight, std::memory_order_relaxed);
+
+                    float alignmentWeight = shared.flockingAlignmentWeight.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Alignment Weight", &alignmentWeight, 0.0f, 8.0f, "%.2f"))
+                        shared.flockingAlignmentWeight.store(alignmentWeight, std::memory_order_relaxed);
+
+                    float cohesionWeight = shared.flockingCohesionWeight.load(std::memory_order_relaxed);
+                    if (ImGui::SliderFloat("Cohesion Weight", &cohesionWeight, 0.0f, 8.0f, "%.2f"))
+                        shared.flockingCohesionWeight.store(cohesionWeight, std::memory_order_relaxed);
+
+                    ImGui::SeparatorText("Visualisation Stats");
+
+                    FlockingStats flockStats{};
+                    {
+                        std::lock_guard<std::mutex> lk(shared.flockingStatsMutex);
+                        flockStats = shared.flockingStats;
+                    }
+                    ImGui::Text("Agents           : %d", flockStats.agentCount);
+                    ImGui::Text("Locally updated  : %d", flockStats.ownedAgentCount);
+                    ImGui::Text("Search mode      : %s", FlockingSearchModeName(flockStats.searchMode));
+                    ImGui::Text("Debug agents     : %d", shared.flockingDebugAgentCount.load(std::memory_order_relaxed));
+                    ImGui::Text("Neighbour checks : %d", flockStats.neighbourChecks);
+                    ImGui::Text("Spatial candidates: %d", flockStats.spatialCandidateChecks);
+                    ImGui::Text("Neighbours found : %d", flockStats.neighboursFound);
+                    ImGui::Text("Avg neighbours   : %.2f",
+                        flockStats.ownedAgentCount > 0
+                        ? static_cast<float>(flockStats.neighboursFound) / static_cast<float>(flockStats.ownedAgentCount)
+                        : 0.0f);
+                    ImGui::Text("Avoidance checks : %d", flockStats.collisionAvoidanceChecks);
+                    ImGui::Text("Cells/nodes      : %d", flockStats.spatialCellsOrNodes);
+                    ImGui::Text("Memory estimate  : %.1f KB",
+                        static_cast<float>(flockStats.memoryEstimateBytes) / 1024.0f);
+                    ImGui::Text("Update time      : %.3f ms", flockStats.updateMs);
+                    ImGui::Text("Spatial build    : %.3f ms", flockStats.spatialBuildMs);
+                    ImGui::Text("Neighbour search : %.3f ms", flockStats.neighbourSearchMs);
                 }
                 ImGui::Separator();
 

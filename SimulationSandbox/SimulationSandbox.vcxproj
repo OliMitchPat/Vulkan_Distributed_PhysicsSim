@@ -131,6 +131,8 @@
     <ClInclude Include="ComponentPool.h" />
     <ClInclude Include="Components.h" />
     <ClInclude Include="EcsTypes.h" />
+    <ClInclude Include="FlockingSystem.h" />
+    <ClInclude Include="FlockingTypes.h" />
     <ClInclude Include="LoopController.h" />
     <ClInclude Include="imgui\imconfig.h" />
     <ClInclude Include="imgui\imgui.h" />
@@ -154,6 +156,7 @@
     <ClInclude Include="RenderScene.h" />
     <ClInclude Include="RenderSystem.h" />
     <ClInclude Include="Scenario.h" />
+    <ClInclude Include="Scenario_FlockingDemo.h" />
     <ClInclude Include="ScenarioManager.h" />
     <ClInclude Include="Scenario_PrimitiveScene.h" />
     <ClInclude Include="Scenario_FlatbufferScene.h" />
@@ -172,6 +175,7 @@
     <ClCompile Include="imgui\imgui_impl_vulkan.cpp" />
     <ClCompile Include="imgui\imgui_tables.cpp" />
     <ClCompile Include="imgui\imgui_widgets.cpp" />
+    <ClCompile Include="FlockingSystem.cpp" />
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="NetAddress.cpp" />
     <ClCompile Include="NetworkingSystem.cpp" />
@@ -183,6 +187,7 @@
     <ClCompile Include="RenderSystem.cpp" />
     <ClCompile Include="SandboxSceneOne.cpp" />
     <ClCompile Include="ScenarioManager.cpp" />
+    <ClCompile Include="Scenario_FlockingDemo.cpp" />
     <ClCompile Include="Scenario_PrimitiveScene.cpp" />
     <ClCompile Include="Scenario_FlatbufferScene.cpp" />
     <ClCompile Include="UdpSocket.cpp" />

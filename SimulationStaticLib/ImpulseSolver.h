@@ -35,14 +35,14 @@ inline void SolveContactImpulse(
 
     const float invMassA = A.EffectiveInverseMass();
     const float invMassB = B.EffectiveInverseMass();
-    const glm::mat3 invIA = A.EffectiveInverseInertiaWorld();
-    const glm::mat3 invIB = B.EffectiveInverseInertiaWorld();
 
     const glm::vec3 n = m.normal;
     const glm::vec3 p = m.contactPoint;
 
-    const glm::vec3 ra = p - A.Position();
-    const glm::vec3 rb = p - B.Position();
+    const glm::vec3 posA = A.Position();
+    const glm::vec3 posB = B.Position();
+    const glm::vec3 ra = p - posA;
+    const glm::vec3 rb = p - posB;
 
     const glm::vec3 va = VelocityAtPoint(A, p);
     const glm::vec3 vb = VelocityAtPoint(B, p);
@@ -50,6 +50,9 @@ inline void SolveContactImpulse(
 
     const float velAlongNormal = glm::dot(rv, n);
     if (velAlongNormal > 0.0f) return;
+
+    const glm::mat3 invIA = A.EffectiveInverseInertiaWorld();
+    const glm::mat3 invIB = B.EffectiveInverseInertiaWorld();
 
     float e = std::clamp(mat.restitution, 0.0f, 1.0f);
     if (std::abs(velAlongNormal) < kRestitutionVelocityThreshold)
@@ -66,6 +69,8 @@ inline void SolveContactImpulse(
     if (std::abs(denom) < 1e-8f) return;
 
     const float j = -(1.0f + e) * velAlongNormal / denom;
+    if (j < 1e-7f) return;
+
     const glm::vec3 impulse = j * n;
 
     A.ApplyImpulseAtPoint(-impulse, p);

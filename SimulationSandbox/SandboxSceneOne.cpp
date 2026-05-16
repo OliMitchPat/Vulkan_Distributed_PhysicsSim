@@ -175,6 +175,12 @@ struct SimTimingStats
     float renderSnapshotMsMax = 0.0f;
     float lockMsAvg = 0.0f;
     float lockMsMax = 0.0f;
+    uint32_t fixedStepsLast = 0;
+    uint32_t fixedStepsMaxAllowed = 0;
+    float accumulatorBeforeMs = 0.0f;
+    float accumulatorAfterMs = 0.0f;
+    float accumulatorDroppedMs = 0.0f;
+    float estimatedSleepWaitMs = 0.0f;
 };
 
 struct TimingSeries
@@ -324,6 +330,12 @@ struct RuntimeDebugCounts
     uint32_t spawnedObjects = 0;
     uint32_t dynamicBodies = 0;
     uint32_t collisionCandidates = 0;
+    uint32_t collisionBroadPhaseRejected = 0;
+    uint32_t collisionSolidSolidCandidates = 0;
+    uint32_t collisionSolidContainerCandidates = 0;
+    uint32_t collisionContainerBroadPhaseRejected = 0;
+    uint32_t collisionSpatialCells = 0;
+    uint32_t collisionSolverVelocityIterations = 0;
     uint32_t collisionContacts = 0;
 };
 
@@ -344,6 +356,9 @@ struct SimSharedState
 
     // Scene switching: render thread writes, sim thread reads and acts
     std::atomic<int> requestedSceneIndex{ -1 };
+    std::atomic<bool> requestedSceneReload{ false };
+    std::atomic<uint32_t> sceneCameraResetGeneration{ 0 };
+    std::atomic<bool> worldRebuildInProgress{ false };
 
     // Gravity enable flag: controlled globally (and applied by sim thread)
     std::atomic<bool> gravityOn{ true };
@@ -393,6 +408,11 @@ struct SimSharedState
     Net::NetworkStats netStats{};
     std::mutex simTimingMutex;
     SimTimingStats simTiming{};
+    std::atomic<uint32_t> fixedStepsLast{ 0 };
+    std::atomic<uint32_t> fixedStepsMaxAllowed{ 12 };
+    std::atomic<float> accumulatorBeforeMs{ 0.0f };
+    std::atomic<float> accumulatorAfterMs{ 0.0f };
+    std::atomic<float> accumulatorDroppedMs{ 0.0f };
     std::mutex flockingStatsMutex;
     FlockingStats flockingStats{};
     std::atomic<bool> flockingEnabled{ true };
@@ -756,6 +776,12 @@ static RuntimeDebugCounts BuildRuntimeDebugCounts(
 
     counts.dynamicBodies = static_cast<uint32_t>(physicsSystem.DynamicBodyCount());
     counts.collisionCandidates = collisionSystem.LastCandidatePairs();
+    counts.collisionBroadPhaseRejected = collisionSystem.LastBroadPhaseRejectedPairs();
+    counts.collisionSolidSolidCandidates = collisionSystem.LastSolidSolidCandidatePairs();
+    counts.collisionSolidContainerCandidates = collisionSystem.LastSolidContainerCandidatePairs();
+    counts.collisionContainerBroadPhaseRejected = collisionSystem.LastContainerBroadPhaseRejectedPairs();
+    counts.collisionSpatialCells = collisionSystem.LastSpatialCells();
+    counts.collisionSolverVelocityIterations = collisionSystem.LastSolverVelocityIterations();
     counts.collisionContacts = collisionSystem.LastContactCount();
     return counts;
 }
@@ -801,6 +827,18 @@ static const char* FlockingSearchModeName(FlockingNeighbourSearchMode mode)
 // ============================================================================
 // Snapshot builder — called by the sim thread after each tick
 // ============================================================================
+static const char* CameraProjectionName(CameraComponent::Projection projection)
+{
+    return projection == CameraComponent::Projection::Orthographic
+        ? "Orthographic"
+        : "Perspective";
+}
+
+static const char* DisplayModeName(int mode)
+{
+    return mode == 1 ? "Owner Colours" : "Material Colours";
+}
+
 static std::shared_ptr<WorldSnapshot> CaptureSnapshot(
     World& world, uint64_t tickNumber, SimSharedState& shared)
 {
@@ -1043,7 +1081,10 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
     float    netStateGenerationAccum = 0.0f;
     RateCounter simTickRate;
     TimingAccumulator timing;
-    const float maxDt = 0.25f;
+    constexpr int MAX_FIXED_SUBSTEPS_PER_FRAME = 12;
+    shared.fixedStepsMaxAllowed.store(MAX_FIXED_SUBSTEPS_PER_FRAME, std::memory_order_relaxed);
+    const float maxDt = 0.05f;
+    double lastDebugCountsSec = 0.0;
 
     while (shared.appRunning.load(std::memory_order_relaxed))
     {
@@ -1057,6 +1098,8 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
         // Clamp to avoid runaway catch-up
         dt = std::min(dt, maxDt);
         uint32_t simTicksThisLoop = 0;
+        float accumulatorBeforeStep = accumulator;
+        float accumulatorDroppedThisLoop = 0.0f;
 
         // Read controls
         const bool   running = shared.simRunning.load(std::memory_order_relaxed);
@@ -1080,6 +1123,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
         if (shared.pendingSceneChange.exchange(false, std::memory_order_acq_rel))
         {
             const int idx = shared.pendingSceneIndex.load(std::memory_order_relaxed);
+            shared.requestedSceneReload.store(true, std::memory_order_release);
             shared.requestedSceneIndex.store(idx, std::memory_order_release);
         }
 
@@ -1095,13 +1139,17 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
             int desired = shared.requestedSceneIndex.load(std::memory_order_acquire);
             if (desired >= 0 && desired < scenarios.Count())
             {
-                if (desired != scenarios.CurrentIndex())
+                const bool forceReload = shared.requestedSceneReload.exchange(false, std::memory_order_acq_rel);
+                if (forceReload || desired != scenarios.CurrentIndex())
                 {
                     const ULONGLONG t = GetTickCount64();
                     std::cout << "[T] SIM applying scene idx=" << desired
                         << " t=" << t << "ms\n";
                     scenarios.SwitchTo(world, desired);
                     physicsSystem.InitializePhysicsBodies(world);
+                    shared.sceneCameraResetGeneration.store(
+                        shared.sceneGeneration.load(std::memory_order_acquire),
+                        std::memory_order_release);
                     accumulator = 0.0f;
 
                     if (scenarios.Current())
@@ -1363,8 +1411,8 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 else if (doStep)
                     accumulator += fdt;
 
-                constexpr int MAX_FIXED_SUBSTEPS_PER_FRAME = 32;
                 int substepsThisFrame = 0;
+                accumulatorBeforeStep = accumulator;
 
                 while (accumulator >= fdt && substepsThisFrame < MAX_FIXED_SUBSTEPS_PER_FRAME)
                 {
@@ -1372,8 +1420,25 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
                         pendingSpawnsBeforeUpdate = fb->PendingSpawnCount();
 
+                    bool flockingDemoRebuild = false;
+                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
+                    {
+                        flockingDemoRebuild =
+                            shared.flockingDemoRebuildRequested.exchange(false, std::memory_order_acq_rel);
+                        if (flockingDemoRebuild)
+                        {
+                            shared.worldRebuildInProgress.store(true, std::memory_order_release);
+                            flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
+                        }
+                    }
+
                     const double scenarioStartSec = NowSeconds();
                     s->Update(world, fdt, currentSceneGeneration);
+                    if (flockingDemoRebuild)
+                    {
+                        shared.sceneCameraResetGeneration.fetch_add(1, std::memory_order_acq_rel);
+                        shared.worldRebuildInProgress.store(false, std::memory_order_release);
+                    }
                     const double flockingStartSec = NowSeconds();
 
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
@@ -1387,10 +1452,6 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     flockingSystem.SetBoundsEnabled(shared.flockingBoundsEnabled.load(std::memory_order_relaxed));
                     flockingSystem.SetNeighbourSearchMode(static_cast<FlockingNeighbourSearchMode>(
                         shared.flockingSearchMode.load(std::memory_order_relaxed)));
-                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
-                    {
-                        flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
-                    }
                     ApplyFlockingUiSettings(world, shared);
                     flockingSystem.Update(world, fdt);
                     {
@@ -1417,7 +1478,10 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 }
 
                 if (accumulator >= fdt)
+                {
+                    accumulatorDroppedThisLoop = accumulator;
                     accumulator = 0.0f;
+                }
             }
             else
             {
@@ -1428,8 +1492,25 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
                         pendingSpawnsBeforeUpdate = fb->PendingSpawnCount();
 
+                    bool flockingDemoRebuild = false;
+                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
+                    {
+                        flockingDemoRebuild =
+                            shared.flockingDemoRebuildRequested.exchange(false, std::memory_order_acq_rel);
+                        if (flockingDemoRebuild)
+                        {
+                            shared.worldRebuildInProgress.store(true, std::memory_order_release);
+                            flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
+                        }
+                    }
+
                     const double scenarioStartSec = NowSeconds();
                     s->Update(world, stepDt, currentSceneGeneration);
+                    if (flockingDemoRebuild)
+                    {
+                        shared.sceneCameraResetGeneration.fetch_add(1, std::memory_order_acq_rel);
+                        shared.worldRebuildInProgress.store(false, std::memory_order_release);
+                    }
                     const double flockingStartSec = NowSeconds();
 
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
@@ -1443,10 +1524,6 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     flockingSystem.SetBoundsEnabled(shared.flockingBoundsEnabled.load(std::memory_order_relaxed));
                     flockingSystem.SetNeighbourSearchMode(static_cast<FlockingNeighbourSearchMode>(
                         shared.flockingSearchMode.load(std::memory_order_relaxed)));
-                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
-                    {
-                        flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
-                    }
                     ApplyFlockingUiSettings(world, shared);
                     flockingSystem.Update(world, stepDt);
                     {
@@ -1500,6 +1577,11 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
         }
 
         const double nowSecForRate = NowSeconds();
+        shared.fixedStepsLast.store(simTicksThisLoop, std::memory_order_relaxed);
+        shared.accumulatorBeforeMs.store(accumulatorBeforeStep * 1000.0f, std::memory_order_relaxed);
+        shared.accumulatorAfterMs.store(accumulator * 1000.0f, std::memory_order_relaxed);
+        shared.accumulatorDroppedMs.store(accumulatorDroppedThisLoop * 1000.0f, std::memory_order_relaxed);
+
         const float tickHz = simTickRate.Add(simTicksThisLoop, nowSecForRate);
         if (tickHz >= 0.0f)
             shared.measuredSimHz.store(tickHz, std::memory_order_relaxed);
@@ -1597,11 +1679,21 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
         SimTimingStats publishedTiming{};
         if (timing.PublishIfReady(NowSeconds(), publishedTiming))
         {
+            publishedTiming.fixedStepsLast = shared.fixedStepsLast.load(std::memory_order_relaxed);
+            publishedTiming.fixedStepsMaxAllowed = shared.fixedStepsMaxAllowed.load(std::memory_order_relaxed);
+            publishedTiming.accumulatorBeforeMs = shared.accumulatorBeforeMs.load(std::memory_order_relaxed);
+            publishedTiming.accumulatorAfterMs = shared.accumulatorAfterMs.load(std::memory_order_relaxed);
+            publishedTiming.accumulatorDroppedMs = shared.accumulatorDroppedMs.load(std::memory_order_relaxed);
+            const float targetSimHz = shared.targetSimHz.load(std::memory_order_relaxed);
+            const float targetLoopMs = targetSimHz > 0.0f ? 1000.0f / targetSimHz : 0.0f;
+            publishedTiming.estimatedSleepWaitMs = std::max(0.0f, targetLoopMs - publishedTiming.simLoopMsAvg);
             std::lock_guard<std::mutex> lk(shared.simTimingMutex);
             shared.simTiming = publishedTiming;
         }
 
+        if ((nowSecForRate - lastDebugCountsSec) >= 0.1)
         {
+            lastDebugCountsSec = nowSecForRate;
             RuntimeDebugCounts counts =
                 BuildRuntimeDebugCounts(world, localPeerId, physicsSystem, collisionSystem);
             std::lock_guard<std::mutex> lk(shared.debugCountsMutex);
@@ -2146,6 +2238,8 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         activeSceneCamera = sceneCameraOptions.front().entity;
         ApplySceneCamera(world, activeSceneCamera, renderCamera);
     }
+    uint32_t appliedSceneCameraGeneration =
+        shared.sceneCameraResetGeneration.load(std::memory_order_acquire);
     const float maxFrameDt = 0.25f;
 
     float displayRenderHz = 0.0f;
@@ -2188,8 +2282,9 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 {
                     const glm::mat3 basis = glm::mat3_cast(renderCamera.orientation);
                     const glm::vec3 right = glm::normalize(basis * glm::vec3(1, 0, 0));
+                    const float signedPitchDelta = pitchDelta * -renderCamera.localForwardZ;
                     renderCamera.orientation =
-                        glm::normalize(glm::angleAxis(pitchDelta, right) * renderCamera.orientation);
+                        glm::normalize(glm::angleAxis(signedPitchDelta, right) * renderCamera.orientation);
                 }
                 if (yawDelta != 0.0f || pitchDelta != 0.0f)
                     renderCamera.rotation = glm::eulerAngles(renderCamera.orientation);
@@ -2207,8 +2302,8 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
             glm::vec3 moveLocal(0.0f);
             if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) moveLocal.z += 1.0f;
             if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) moveLocal.z -= 1.0f;
-            if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) moveLocal.x -= 1.0f;
-            if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) moveLocal.x += 1.0f;
+            if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) moveLocal.x += 1.0f;
+            if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) moveLocal.x -= 1.0f;
             if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) moveLocal.y -= 1.0f;
             if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) moveLocal.y += 1.0f;
 
@@ -2221,13 +2316,13 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 {
                     const glm::mat3 basis = glm::mat3_cast(renderCamera.orientation);
                     forward = glm::normalize(basis * glm::vec3(0, 0, renderCamera.localForwardZ));
-                    right = glm::normalize(basis * glm::vec3(1, 0, 0));
+                    right = glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
                 }
                 else
                 {
                     float yaw = renderCamera.rotation.y;
                     forward = glm::vec3(std::sin(yaw), 0.0f, std::cos(yaw));
-                    right = glm::vec3(forward.z, 0.0f, -forward.x);
+                    right = glm::normalize(glm::cross(forward, glm::vec3(0, 1, 0)));
                 }
                 glm::vec3 up(0.0f, 1.0f, 0.0f);
                 renderCamera.position += (right * moveLocal.x + up * moveLocal.y + forward * moveLocal.z) * (moveSpeed * dt);
@@ -2237,13 +2332,24 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         // Snapshot: consume latest from sim thread
         std::shared_ptr<WorldSnapshot> snap = shared.snapshotBuf.consume();
 
+        const uint32_t cameraResetGeneration =
+            shared.sceneCameraResetGeneration.load(std::memory_order_acquire);
+        if (cameraResetGeneration != appliedSceneCameraGeneration)
+        {
+            activeSceneCamera = INVALID_ENTITY;
+            appliedSceneCameraGeneration = cameraResetGeneration;
+        }
+
         if (activeSceneCamera == INVALID_ENTITY)
         {
-            sceneCameraOptions = CollectSceneCameras(world);
-            if (!sceneCameraOptions.empty())
+            if (!shared.worldRebuildInProgress.load(std::memory_order_acquire))
             {
-                activeSceneCamera = sceneCameraOptions.front().entity;
-                ApplySceneCamera(world, activeSceneCamera, renderCamera);
+                sceneCameraOptions = CollectSceneCameras(world);
+                if (!sceneCameraOptions.empty())
+                {
+                    activeSceneCamera = sceneCameraOptions.front().entity;
+                    ApplySceneCamera(world, activeSceneCamera, renderCamera);
+                }
             }
         }
 
@@ -2254,7 +2360,8 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         displayNetHz = shared.measuredNetworkHz.load(std::memory_order_relaxed);
         displaySimHz = shared.measuredSimHz.load(std::memory_order_relaxed);
 
-        if (ImGui::BeginMainMenuBar())
+        // The coursework demo UI below replaces the old menu bar controls.
+        if (false && ImGui::BeginMainMenuBar())
         {
             if (ImGui::BeginMenu("Simulation"))
             {
@@ -2718,6 +2825,8 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     ImGui::Text("Spawned objects approx     : %u", counts.spawnedObjects);
                     ImGui::Text("Dynamic body cache         : %u", counts.dynamicBodies);
                     ImGui::Text("Collision candidate pairs  : %u", counts.collisionCandidates);
+                    ImGui::Text("  solid/solid              : %u", counts.collisionSolidSolidCandidates);
+                    ImGui::Text("  solid/container          : %u", counts.collisionSolidContainerCandidates);
                     ImGui::Text("Collision contacts         : %u", counts.collisionContacts);
                 }
 
@@ -2763,6 +2872,615 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
             }
 
             ImGui::EndMainMenuBar();
+        }
+
+        {
+            if (!shared.worldRebuildInProgress.load(std::memory_order_acquire))
+                sceneCameraOptions = CollectSceneCameras(world);
+
+            Net::NetworkStats netStats{};
+            {
+                std::lock_guard<std::mutex> lk(shared.netStatsMutex);
+                netStats = shared.netStats;
+            }
+
+            SimTimingStats timingStats{};
+            {
+                std::lock_guard<std::mutex> lk(shared.simTimingMutex);
+                timingStats = shared.simTiming;
+            }
+
+            RuntimeDebugCounts counts{};
+            {
+                std::lock_guard<std::mutex> lk(shared.debugCountsMutex);
+                counts = shared.debugCounts;
+            }
+
+            FlockingStats flockStats{};
+            {
+                std::lock_guard<std::mutex> lk(shared.flockingStatsMutex);
+                flockStats = shared.flockingStats;
+            }
+
+            std::vector<int> simCores;
+            {
+                std::lock_guard<std::mutex> lk(shared.simWorkerCoresMutex);
+                simCores = shared.simWorkerCores;
+            }
+            std::ostringstream simCoreText;
+            if (simCores.empty())
+            {
+                simCoreText << shared.simCoreAssigned;
+            }
+            else
+            {
+                for (size_t i = 0; i < simCores.size(); ++i)
+                {
+                    if (i > 0) simCoreText << ", ";
+                    simCoreText << simCores[i];
+                }
+            }
+
+            static std::array<FlockingStats, 3> flockComparisonSamples{};
+            static std::array<bool, 3> flockComparisonValid{ false, false, false };
+            const int sampleMode = static_cast<int>(flockStats.searchMode);
+            if (sampleMode >= 0 && sampleMode < 3 && flockStats.agentCount > 0)
+            {
+                flockComparisonSamples[static_cast<size_t>(sampleMode)] = flockStats;
+                flockComparisonValid[static_cast<size_t>(sampleMode)] = true;
+            }
+
+            const int currentSceneIndex = scenarios.CurrentIndex();
+            const char* currentSceneName = scenarios.Current()
+                ? scenarios.Current()->Name()
+                : "None";
+
+            std::string currentCameraName = "Free Camera";
+            CameraComponent::Projection currentCameraProjection = renderCamera.projection;
+            for (const auto& camOption : sceneCameraOptions)
+            {
+                if (camOption.entity == activeSceneCamera)
+                {
+                    currentCameraName = camOption.name;
+                    currentCameraProjection = camOption.projection;
+                    break;
+                }
+            }
+
+            auto requestSceneSwitch = [&](int sceneIndex, bool forceReload = false)
+                {
+                    if ((!forceReload && sceneIndex == currentSceneIndex) || sceneIndex < 0 || sceneIndex >= scenarios.Count())
+                        return;
+
+                    const uint32_t newGeneration =
+                        shared.sceneGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+                    {
+                        std::lock_guard<std::mutex> lk(shared.outSnapMutex);
+                        shared.outOwnedItems.clear();
+                        shared.outTick = 0;
+                        shared.outDirty = false;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
+                        shared.outSpawnEvents.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(shared.inSnapMutex);
+                        shared.inReplicaHistory.clear();
+                        shared.inReplicaLatestTick.clear();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
+                        shared.inSpawnEvents.clear();
+                    }
+
+                    shared.sceneTransitionActive.store(true, std::memory_order_release);
+                    shared.sceneTransitionRemainingSec.store(0.10f, std::memory_order_release);
+                    shared.requestedSceneReload.store(forceReload, std::memory_order_release);
+                    shared.requestedSceneIndex.store(sceneIndex, std::memory_order_release);
+                    activeSceneCamera = INVALID_ENTITY;
+
+                    shared.sendSceneGeneration.store(newGeneration, std::memory_order_release);
+                    shared.sendSceneIndex.store(sceneIndex, std::memory_order_relaxed);
+                    shared.sendSceneChange.store(true, std::memory_order_release);
+                };
+
+            auto showTimingRow = [](const char* name, float avgMs, float maxMs)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(name);
+                    ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f", avgMs);
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%.3f", maxMs);
+                };
+
+            if (ImGui::BeginMainMenuBar())
+            {
+            ImGui::Text("Final Lab");
+            ImGui::Separator();
+
+            if (ImGui::BeginMenu("Summary"))
+            {
+                ImGui::Text("Scene: %s", currentSceneName);
+                ImGui::Text("Peer: %d / 4", cfg.peer_id);
+                ImGui::Text("Display Mode: %s", DisplayModeName(shared.displayMode.load(std::memory_order_relaxed)));
+                ImGui::Text("Camera: %s (%s)", currentCameraName.c_str(), CameraProjectionName(currentCameraProjection));
+
+            if (ImGui::BeginTable("SummaryHzTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+            {
+                ImGui::TableSetupColumn("System");
+                ImGui::TableSetupColumn("Target Hz");
+                ImGui::TableSetupColumn("Measured Hz");
+                ImGui::TableHeadersRow();
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Render");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.0f", shared.targetRenderHz.load(std::memory_order_relaxed));
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", displayRenderHz);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Network Send");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.0f", shared.targetNetworkHz.load(std::memory_order_relaxed));
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", shared.measuredNetworkSendHz.load(std::memory_order_relaxed));
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Network Receive");
+                ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted("polling");
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", shared.measuredNetworkRecvHz.load(std::memory_order_relaxed));
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Fixed Simulation Step");
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.0f", shared.targetSimHz.load(std::memory_order_relaxed));
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", displaySimHz);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("Simulation Outer Loop");
+                ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted("as needed");
+                ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", shared.measuredSimLoopHz.load(std::memory_order_relaxed));
+
+                ImGui::EndTable();
+            }
+
+                ImGui::Text("Render core: logical %d", shared.renderCoreAssigned);
+                ImGui::Text("Network recv core: logical %d", shared.netRecvCoreAssigned);
+                ImGui::Text("Network send core: logical %d", shared.netSendCoreAssigned);
+                ImGui::Text("Simulation cores: logical %s", simCoreText.str().c_str());
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Scene / Simulation"))
+            {
+                ImGui::Text("Current scene: %s", currentSceneName);
+                ImGui::TextDisabled("Scene switching is Global. Camera and display mode are Local.");
+
+                bool simRunning = shared.simRunning.load(std::memory_order_relaxed);
+                if (ImGui::MenuItem(simRunning ? "Pause Simulation" : "Start Simulation"))
+                    shared.simRunning.store(!simRunning, std::memory_order_relaxed);
+                if (ImGui::MenuItem("Step Once"))
+                    shared.stepOnce.store(true, std::memory_order_relaxed);
+
+                bool useFixed = shared.useFixedTimestep.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Use Fixed Timestep", &useFixed))
+                    shared.useFixedTimestep.store(useFixed, std::memory_order_relaxed);
+
+                float fdt = shared.fixedDt.load(std::memory_order_relaxed);
+                float oldFdt = fdt;
+                ImGui::InputFloat("Fixed dt (s)", &fdt, 0.001f, 0.01f, "%.4f");
+                fdt = std::max(0.0001f, std::min(fdt, 0.1f));
+                if (fdt != oldFdt)
+                    shared.fixedDt.store(fdt, std::memory_order_relaxed);
+                ImGui::Text("Fixed timestep frequency: %.1f Hz", 1.0f / fdt);
+
+                const char* integrators[] = { "Euler", "Semi-Implicit Euler" };
+                int integ = shared.integratorType.load(std::memory_order_relaxed);
+                if (ImGui::Combo("Integrator", &integ, integrators, IM_ARRAYSIZE(integrators)))
+                    shared.integratorType.store(integ, std::memory_order_relaxed);
+
+                ImGui::SeparatorText("Global Scene Controls");
+                if (ImGui::BeginCombo("Scene (Global)", currentSceneName))
+                {
+                    for (int si = 0; si < scenarios.Count(); ++si)
+                    {
+                        const bool selected = (si == currentSceneIndex);
+                        if (ImGui::Selectable(scenarios.Get(si)->Name(), selected))
+                            requestSceneSwitch(si);
+                        if (selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                bool grav = shared.gravityOn.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Gravity Enabled (Global)", &grav))
+                {
+                    shared.pendingGravityEnabled.store(grav, std::memory_order_relaxed);
+                    shared.pendingGravityChange.store(true, std::memory_order_release);
+                    shared.sendGravityEnabled.store(grav, std::memory_order_relaxed);
+                    shared.sendGravityChange.store(true, std::memory_order_release);
+                }
+
+                const char* displayModes[] = { "Material Colours", "Owner Colours" };
+                int displayMode = shared.displayMode.load(std::memory_order_relaxed);
+                if (ImGui::Combo("Display Mode (Local)", &displayMode, displayModes, IM_ARRAYSIZE(displayModes)))
+                    shared.displayMode.store(displayMode, std::memory_order_relaxed);
+
+                {
+                    std::lock_guard<std::mutex> lk(shared.clearColourMutex);
+                    ImGui::ColorEdit3("Background Colour (Local)", shared.clearColour);
+                }
+
+                if (ImGui::BeginCombo("Camera (Local)", currentCameraName.c_str()))
+                {
+                    for (const auto& camOption : sceneCameraOptions)
+                    {
+                        std::string label = camOption.name + " [" + CameraProjectionName(camOption.projection) + "]";
+                        const bool selected = (activeSceneCamera == camOption.entity);
+                        if (ImGui::Selectable(label.c_str(), selected))
+                        {
+                            if (ApplySceneCamera(world, camOption.entity, renderCamera))
+                                activeSceneCamera = camOption.entity;
+                        }
+                        if (selected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::Text("Camera info: %s  FOV %.1f  Ortho %.1f  Near/Far %.2f / %.1f",
+                    CameraProjectionName(renderCamera.projection),
+                    renderCamera.fov,
+                    renderCamera.orthoSize,
+                    renderCamera.nearClip,
+                    renderCamera.farClip);
+                ImGui::TextDisabled("Controls: WASD/QE move, arrow keys look. Up looks up, Down looks down.");
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Networking / Peers"))
+            {
+                ImGui::Text("Architecture: peer-to-peer, no client-server authority");
+                ImGui::Text("Local peer/client ID: %d", cfg.peer_id);
+                ImGui::Text("Configured remote peers: %d", (int)cfg.RemotePeers().size());
+                ImGui::Text("Control port: %u  Snapshot port: %u",
+                    (unsigned)cfg.control_bind_port,
+                    (unsigned)cfg.snapshot_bind_port);
+                for (const auto& peer : cfg.RemotePeers())
+                {
+                    ImGui::Text("Peer %d -> %s  control:%u  snapshot:%u",
+                        peer.peerId,
+                        peer.host.c_str(),
+                        (unsigned)peer.control_port,
+                        (unsigned)peer.snapshot_port);
+                }
+
+                if (ImGui::BeginTable("NetworkStatsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+                {
+                    ImGui::TableSetupColumn("Metric");
+                    ImGui::TableSetupColumn("Value");
+                    ImGui::TableHeadersRow();
+#define NET_ROW(label, value) ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(label); ImGui::TableSetColumnIndex(1); ImGui::Text("%u", (unsigned)(value))
+                    NET_ROW("Control packets received", netStats.controlPacketsReceived);
+                    NET_ROW("Snapshot packets sent", netStats.snapshotPacketsSent);
+                    NET_ROW("Snapshot packets received", netStats.snapshotPacketsReceived);
+                    NET_ROW("Snapshot packets dropped", netStats.snapshotPacketsDropped);
+                    NET_ROW("Snapshot packets delayed", netStats.snapshotPacketsDelayed);
+                    NET_ROW("Global commands sent", netStats.globalCommandsSent);
+                    NET_ROW("Global commands received", netStats.globalCommandsReceived);
+                    NET_ROW("Spawn packets sent", netStats.spawnPacketsSent);
+                    NET_ROW("Spawn packets received", netStats.spawnPacketsReceived);
+                    NET_ROW("Reliable resends", netStats.reliableResends);
+                    NET_ROW("Stale replica updates ignored", shared.staleReplicaPacketsIgnored.load(std::memory_order_relaxed));
+#undef NET_ROW
+                    ImGui::EndTable();
+                }
+
+                ImGui::SeparatorText("Network Impairment (Local)");
+                bool impairOn = shared.netImpairmentEnabled.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Enable Snapshot Impairment", &impairOn))
+                    shared.netImpairmentEnabled.store(impairOn, std::memory_order_relaxed);
+                float latencyMs = shared.netLatencyMs.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Latency (ms)", &latencyMs, 0.0f, 300.0f, "%.0f"))
+                    shared.netLatencyMs.store(latencyMs, std::memory_order_relaxed);
+                float jitterMs = shared.netJitterMs.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Jitter (ms)", &jitterMs, 0.0f, 150.0f, "%.0f"))
+                    shared.netJitterMs.store(jitterMs, std::memory_order_relaxed);
+                float dropPct = shared.netDropPercent.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Packet Loss (%)", &dropPct, 0.0f, 80.0f, "%.0f"))
+                    shared.netDropPercent.store(dropPct, std::memory_order_relaxed);
+                if (ImGui::Button("Coursework Worst Case: 100ms +/-50ms, 20% loss"))
+                {
+                    shared.netImpairmentEnabled.store(true, std::memory_order_relaxed);
+                    shared.netLatencyMs.store(100.0f, std::memory_order_relaxed);
+                    shared.netJitterMs.store(50.0f, std::memory_order_relaxed);
+                    shared.netDropPercent.store(20.0f, std::memory_order_relaxed);
+                }
+
+                ImGui::SeparatorText("Replica Smoothing / Interpolation");
+                bool smoothOn = shared.replicaSmoothingEnabled.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Enable Smoothing", &smoothOn))
+                    shared.replicaSmoothingEnabled.store(smoothOn, std::memory_order_relaxed);
+
+                float interpDelayMs = shared.replicaInterpDelayMs.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Interpolation Delay (ms)", &interpDelayMs, 60.0f, 250.0f, "%.0f"))
+                    shared.replicaInterpDelayMs.store(interpDelayMs, std::memory_order_relaxed);
+
+                float extrapMs = shared.replicaMaxExtrapolationMs.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Max Extrapolation (ms)", &extrapMs, 0.0f, 200.0f, "%.0f"))
+                    shared.replicaMaxExtrapolationMs.store(extrapMs, std::memory_order_relaxed);
+
+                float correctionThreshold = shared.replicaCorrectionThreshold.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Large Error Threshold (m)", &correctionThreshold, 0.1f, 3.0f, "%.2f"))
+                    shared.replicaCorrectionThreshold.store(correctionThreshold, std::memory_order_relaxed);
+
+                float correctionStrength = shared.replicaCorrectionStrength.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Correction Strength", &correctionStrength, 0.0f, 3.0f, "%.2f"))
+                    shared.replicaCorrectionStrength.store(correctionStrength, std::memory_order_relaxed);
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Concurrency / Threads"))
+            {
+                if (ImGui::BeginTable("ConcurrencyTable", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+                {
+                    ImGui::TableSetupColumn("System");
+                    ImGui::TableSetupColumn("Target Hz");
+                    ImGui::TableSetupColumn("Measured Hz");
+                    ImGui::TableSetupColumn("Thread/Core");
+                    ImGui::TableHeadersRow();
+
+                    auto freqRow = [](const char* system, const char* target, float measured, const char* core)
+                        {
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(system);
+                            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(target);
+                            ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", measured);
+                            ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(core);
+                        };
+
+                    char renderTarget[32], netTarget[32], simTarget[32], renderCoreText[32], recvCoreText[32], sendCoreText[32], simCoreBuf[128];
+                    snprintf(renderTarget, sizeof(renderTarget), "%.0f", shared.targetRenderHz.load(std::memory_order_relaxed));
+                    snprintf(netTarget, sizeof(netTarget), "%.0f", shared.targetNetworkHz.load(std::memory_order_relaxed));
+                    snprintf(simTarget, sizeof(simTarget), "%.0f", shared.targetSimHz.load(std::memory_order_relaxed));
+                    snprintf(renderCoreText, sizeof(renderCoreText), "logical %d", shared.renderCoreAssigned);
+                    snprintf(recvCoreText, sizeof(recvCoreText), "logical %d", shared.netRecvCoreAssigned);
+                    snprintf(sendCoreText, sizeof(sendCoreText), "logical %d", shared.netSendCoreAssigned);
+                    snprintf(simCoreBuf, sizeof(simCoreBuf), "logical %s", simCoreText.str().c_str());
+
+                    freqRow("Render", renderTarget, displayRenderHz, renderCoreText);
+                    freqRow("Network Receive", "polling", shared.measuredNetworkRecvHz.load(std::memory_order_relaxed), recvCoreText);
+                    freqRow("Network Send", netTarget, shared.measuredNetworkSendHz.load(std::memory_order_relaxed), sendCoreText);
+                    freqRow("Fixed Simulation Step", simTarget, displaySimHz, simCoreBuf);
+                    freqRow("Simulation Outer Loop", "as needed", shared.measuredSimLoopHz.load(std::memory_order_relaxed), simCoreBuf);
+
+                    ImGui::EndTable();
+                }
+
+                if (ImGui::SliderFloat("Render Hz##Panel", &uiRenderHz, 0.0f, 300.0f, "%.0f"))
+                    shared.targetRenderHz.store(uiRenderHz, std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Network Send Hz##Panel", &uiNetHz, 0.0f, 120.0f, "%.0f"))
+                    shared.targetNetworkHz.store(uiNetHz, std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Simulation Hz##Panel", &uiSimHz, 0.0f, 2000.0f, "%.0f"))
+                {
+                    shared.targetSimHz.store(uiSimHz, std::memory_order_relaxed);
+                    if (uiSimHz > 0.0f)
+                        shared.fixedDt.store(1.0f / uiSimHz, std::memory_order_relaxed);
+                }
+                if (ImGui::SliderFloat("Snapshot Send Hz##Panel", &uiSnapshotHz, 0.0f, 2000.0f, "%.0f"))
+                {
+                    const float minSnapshotHz = std::max(1.0f, shared.targetNetworkHz.load(std::memory_order_relaxed));
+                    if (uiSnapshotHz > 0.0f && uiSnapshotHz < minSnapshotHz)
+                        uiSnapshotHz = minSnapshotHz;
+                    shared.snapshotSendHz.store(uiSnapshotHz, std::memory_order_relaxed);
+                }
+                ImGui::Text("Snapshot rule: %s",
+                    uiSnapshotHz <= 0.0f
+                    ? "every fresh simulation tick"
+                    : "rate limited, minimum network tick rate");
+                ImGui::Text("Fixed timestep: %.6f s (%.1f Hz)",
+                    shared.fixedDt.load(std::memory_order_relaxed),
+                    1.0f / std::max(0.000001f, shared.fixedDt.load(std::memory_order_relaxed)));
+                ImGui::Text("Fixed steps last loop: %u / %u",
+                    shared.fixedStepsLast.load(std::memory_order_relaxed),
+                    shared.fixedStepsMaxAllowed.load(std::memory_order_relaxed));
+                ImGui::Text("Accumulator before/after/dropped: %.3f / %.3f / %.3f ms",
+                    shared.accumulatorBeforeMs.load(std::memory_order_relaxed),
+                    shared.accumulatorAfterMs.load(std::memory_order_relaxed),
+                    shared.accumulatorDroppedMs.load(std::memory_order_relaxed));
+                ImGui::Text("Simulation workers: %d", shared.simWorkerThreadCount.load(std::memory_order_relaxed));
+
+                ImGui::SeparatorText("Required Processor Mapping");
+                ImGui::Text("Spec core 1 -> logical processor 0 -> Render");
+                ImGui::Text("Spec core 2 -> logical processor 1 -> Network Receive");
+                ImGui::Text("Spec core 3 -> logical processor 2 -> Network Send");
+                ImGui::Text("Spec core 4+ -> logical processor 3+ -> Simulation");
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Scene Objects / Physics"))
+            {
+                const uint32_t totalOwnedObjects =
+                    counts.localOwned + counts.remoteOwned + counts.staticObjects + counts.animatedObjects;
+                ImGui::Text("Rendered instances: %u", snap ? (unsigned)snap->instances.size() : 0u);
+                ImGui::Text("Tracked scene objects: %u", totalOwnedObjects);
+                ImGui::Text("Static/local objects: %u", counts.staticObjects);
+                ImGui::Text("Animated objects: %u", counts.animatedObjects);
+                ImGui::Text("Local-owned simulated objects: %u", counts.localOwned);
+                ImGui::Text("Remote replicated objects: %u", counts.remoteOwned);
+                ImGui::Text("Spawned objects approx: %u", counts.spawnedObjects);
+                ImGui::Text("Flocking boids: %d", flockStats.agentCount);
+
+                ImGui::SeparatorText("Physics / Collision");
+                ImGui::Text("Dynamic body cache: %u", counts.dynamicBodies);
+                ImGui::Text("Collision narrow-phase pairs: %u", counts.collisionCandidates);
+                ImGui::Text("  Solid/solid pairs: %u", counts.collisionSolidSolidCandidates);
+                ImGui::Text("  Solid/container pairs: %u", counts.collisionSolidContainerCandidates);
+                ImGui::Text("Broad-phase rejected pairs: %u", counts.collisionBroadPhaseRejected);
+                ImGui::Text("  Container rejects: %u", counts.collisionContainerBroadPhaseRejected);
+                ImGui::Text("Spatial broad-phase cells: %u", counts.collisionSpatialCells);
+                ImGui::Text("Collision contacts: %u", counts.collisionContacts);
+                ImGui::Text("Solver velocity iterations: %u", counts.collisionSolverVelocityIterations);
+                ImGui::Text("Physics update avg/max: %.3f / %.3f ms", timingStats.physicsMsAvg, timingStats.physicsMsMax);
+                ImGui::Text("Collision update avg/max: %.3f / %.3f ms", timingStats.collisionMsAvg, timingStats.collisionMsMax);
+                ImGui::Text("Scenario/spawner avg/max: %.3f / %.3f ms", timingStats.scenarioMsAvg, timingStats.scenarioMsMax);
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Flocking / Advanced Feature"))
+            {
+                if (flockStats.agentCount <= 0)
+                    ImGui::TextDisabled("No flocking agents in current scene.");
+
+                bool flockingEnabled = shared.flockingEnabled.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Flocking Enabled", &flockingEnabled))
+                    shared.flockingEnabled.store(flockingEnabled, std::memory_order_relaxed);
+                bool boundsEnabled = shared.flockingBoundsEnabled.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Bounds Avoidance Enabled", &boundsEnabled))
+                    shared.flockingBoundsEnabled.store(boundsEnabled, std::memory_order_relaxed);
+                bool debugEnabled = shared.flockingDebugEnabled.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Debug Force Data / Visualisation Enabled", &debugEnabled))
+                    shared.flockingDebugEnabled.store(debugEnabled, std::memory_order_relaxed);
+                bool useUiSettings = shared.flockingUseUiSettings.load(std::memory_order_relaxed);
+                if (ImGui::Checkbox("Apply UI Settings To Boids", &useUiSettings))
+                    shared.flockingUseUiSettings.store(useUiSettings, std::memory_order_relaxed);
+
+                int demoBoidCount = shared.flockingDemoBoidCount.load(std::memory_order_relaxed);
+                if (ImGui::SliderInt("Performance Demo Boid Count", &demoBoidCount, 10, 2000))
+                    shared.flockingDemoBoidCount.store(demoBoidCount, std::memory_order_relaxed);
+                ImGui::SameLine();
+                if (ImGui::Button("Apply Boid Count"))
+                    shared.flockingDemoRebuildRequested.store(true, std::memory_order_release);
+
+                int searchMode = shared.flockingSearchMode.load(std::memory_order_relaxed);
+                const char* searchModeLabels[] = {
+                    "Brute Force (baseline, no segmentation)",
+                    "Uniform Grid (spatial segmentation 1)",
+                    "Octree (spatial segmentation 2)"
+                };
+                if (ImGui::Combo("Neighbour Search Mode", &searchMode, searchModeLabels, IM_ARRAYSIZE(searchModeLabels)))
+                    shared.flockingSearchMode.store(searchMode, std::memory_order_relaxed);
+
+                float maxSpeed = shared.flockingMaxSpeed.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Max Speed##FlockPanel", &maxSpeed, 0.5f, 30.0f, "%.1f"))
+                    shared.flockingMaxSpeed.store(maxSpeed, std::memory_order_relaxed);
+                float maxForce = shared.flockingMaxForce.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Max Force##FlockPanel", &maxForce, 0.5f, 60.0f, "%.1f"))
+                    shared.flockingMaxForce.store(maxForce, std::memory_order_relaxed);
+                float perceptionRadius = shared.flockingPerceptionRadius.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Perception Radius##FlockPanel", &perceptionRadius, 0.5f, 20.0f, "%.1f"))
+                    shared.flockingPerceptionRadius.store(perceptionRadius, std::memory_order_relaxed);
+                float separationRadius = shared.flockingSeparationRadius.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Separation Radius##FlockPanel", &separationRadius, 0.1f, 10.0f, "%.1f"))
+                    shared.flockingSeparationRadius.store(std::min(separationRadius, shared.flockingPerceptionRadius.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+
+                ImGui::SeparatorText("Weighted Truncated Sum");
+                float avoidanceWeight = shared.flockingAvoidanceWeight.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Avoidance Weight##FlockPanel", &avoidanceWeight, 0.0f, 8.0f, "%.2f"))
+                    shared.flockingAvoidanceWeight.store(avoidanceWeight, std::memory_order_relaxed);
+                float separationWeight = shared.flockingSeparationWeight.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Separation Weight##FlockPanel", &separationWeight, 0.0f, 8.0f, "%.2f"))
+                    shared.flockingSeparationWeight.store(separationWeight, std::memory_order_relaxed);
+                float alignmentWeight = shared.flockingAlignmentWeight.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Alignment Weight##FlockPanel", &alignmentWeight, 0.0f, 8.0f, "%.2f"))
+                    shared.flockingAlignmentWeight.store(alignmentWeight, std::memory_order_relaxed);
+                float cohesionWeight = shared.flockingCohesionWeight.load(std::memory_order_relaxed);
+                if (ImGui::SliderFloat("Cohesion Weight##FlockPanel", &cohesionWeight, 0.0f, 8.0f, "%.2f"))
+                    shared.flockingCohesionWeight.store(cohesionWeight, std::memory_order_relaxed);
+
+                ImGui::SeparatorText("Live Flocking Stats");
+                ImGui::Text("Agents: %d  Locally updated: %d  Debug agents: %d",
+                    flockStats.agentCount,
+                    flockStats.ownedAgentCount,
+                    shared.flockingDebugAgentCount.load(std::memory_order_relaxed));
+                ImGui::Text("Mode: %s", FlockingSearchModeName(flockStats.searchMode));
+                ImGui::Text("Neighbour checks: %d  Spatial candidates: %d  Found: %d",
+                    flockStats.neighbourChecks,
+                    flockStats.spatialCandidateChecks,
+                    flockStats.neighboursFound);
+                ImGui::Text("Collision avoidance checks: %d", flockStats.collisionAvoidanceChecks);
+                ImGui::Text("Cells/nodes: %d  Memory estimate: %.1f KB",
+                    flockStats.spatialCellsOrNodes,
+                    static_cast<float>(flockStats.memoryEstimateBytes) / 1024.0f);
+                ImGui::Text("Spatial build: %.3f ms  Search: %.3f ms  Total: %.3f ms",
+                    flockStats.spatialBuildMs,
+                    flockStats.neighbourSearchMs,
+                    flockStats.updateMs);
+
+                ImGui::SeparatorText("Spatial Segmentation Comparison");
+                if (ImGui::Button("Record Current Mode Sample"))
+                {
+                    if (sampleMode >= 0 && sampleMode < 3)
+                    {
+                        flockComparisonSamples[static_cast<size_t>(sampleMode)] = flockStats;
+                        flockComparisonValid[static_cast<size_t>(sampleMode)] = true;
+                    }
+                }
+                if (ImGui::BeginTable("FlockingComparisonTable", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+                {
+                    ImGui::TableSetupColumn("Mode");
+                    ImGui::TableSetupColumn("Boids");
+                    ImGui::TableSetupColumn("Neighbour Checks");
+                    ImGui::TableSetupColumn("Spatial Candidates");
+                    ImGui::TableSetupColumn("Build ms");
+                    ImGui::TableSetupColumn("Search ms");
+                    ImGui::TableSetupColumn("Update ms");
+                    ImGui::TableSetupColumn("Memory KB");
+                    ImGui::TableSetupColumn("Cells/Nodes");
+                    ImGui::TableHeadersRow();
+
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        const FlockingStats& s = flockComparisonSamples[static_cast<size_t>(i)];
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(FlockingSearchModeName(static_cast<FlockingNeighbourSearchMode>(i)));
+                        if (!flockComparisonValid[static_cast<size_t>(i)])
+                        {
+                            ImGui::TableSetColumnIndex(1); ImGui::TextDisabled("no sample");
+                            continue;
+                        }
+                        ImGui::TableSetColumnIndex(1); ImGui::Text("%d", s.agentCount);
+                        ImGui::TableSetColumnIndex(2); ImGui::Text("%d", s.neighbourChecks);
+                        ImGui::TableSetColumnIndex(3); ImGui::Text("%d", s.spatialCandidateChecks);
+                        ImGui::TableSetColumnIndex(4); ImGui::Text("%.3f", s.spatialBuildMs);
+                        ImGui::TableSetColumnIndex(5); ImGui::Text("%.3f", s.neighbourSearchMs);
+                        ImGui::TableSetColumnIndex(6); ImGui::Text("%.3f", s.updateMs);
+                        ImGui::TableSetColumnIndex(7); ImGui::Text("%.1f", static_cast<float>(s.memoryEstimateBytes) / 1024.0f);
+                        ImGui::TableSetColumnIndex(8); ImGui::Text("%d", s.spatialCellsOrNodes);
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Debug / Performance"))
+            {
+                ImGui::Text("Frame time: %.3f ms", displayRenderHz > 0.0f ? 1000.0f / displayRenderHz : 0.0f);
+                ImGui::Text("Fixed steps last loop: %u / %u",
+                    timingStats.fixedStepsLast,
+                    timingStats.fixedStepsMaxAllowed);
+                ImGui::Text("Accumulator before stepping: %.3f ms", timingStats.accumulatorBeforeMs);
+                ImGui::Text("Accumulator after stepping : %.3f ms", timingStats.accumulatorAfterMs);
+                ImGui::Text("Dropped accumulator time   : %.3f ms", timingStats.accumulatorDroppedMs);
+                ImGui::Text("Estimated sleep/wait time  : %.3f ms", timingStats.estimatedSleepWaitMs);
+                if (ImGui::BeginTable("TimingStatsTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+                {
+                    ImGui::TableSetupColumn("Section");
+                    ImGui::TableSetupColumn("Avg ms");
+                    ImGui::TableSetupColumn("Max ms");
+                    ImGui::TableHeadersRow();
+                    showTimingRow("Scenario / spawners", timingStats.scenarioMsAvg, timingStats.scenarioMsMax);
+                    showTimingRow("Physics update", timingStats.physicsMsAvg, timingStats.physicsMsMax);
+                    showTimingRow("Collision update", timingStats.collisionMsAvg, timingStats.collisionMsMax);
+                    showTimingRow("Network state generation", timingStats.netStateMsAvg, timingStats.netStateMsMax);
+                    showTimingRow("Render snapshot capture", timingStats.renderSnapshotMsAvg, timingStats.renderSnapshotMsMax);
+                    showTimingRow("Shared lock wait", timingStats.lockMsAvg, timingStats.lockMsMax);
+                    showTimingRow("Outer simulation loop", timingStats.simLoopMsAvg, timingStats.simLoopMsMax);
+                    ImGui::EndTable();
+                }
+                ImGui::TextDisabled("Timing average and max are published from the same rolling half-second window.");
+                ImGui::Text("Snapshot tick: %llu", snap ? (unsigned long long)snap->simTickNumber : 0ull);
+                ImGui::EndMenu();
+            }
+
+            ImGui::EndMainMenuBar();
+            }
         }
 
         renderer.EndImGuiFrame();

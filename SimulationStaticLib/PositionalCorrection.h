@@ -22,6 +22,7 @@ inline void PositionalCorrection(
 
     const float correctionMag =
         std::max(m.penetration - slop, 0.0f) / invMassSum * percent;
+    if (correctionMag <= 0.0f) return;
 
     const glm::vec3 correction = correctionMag * m.normal;
 

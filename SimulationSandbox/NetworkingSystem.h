@@ -20,6 +20,7 @@ namespace Net
         uint32_t snapshotPacketsReceived = 0;
         uint32_t snapshotPacketsDropped = 0;
         uint32_t snapshotPacketsDelayed = 0;
+        uint32_t snapshotPacketsSkippedInactivePeer = 0;
         uint32_t reliableResends = 0;
 
         uint32_t globalCommandsSent = 0;
@@ -47,6 +48,8 @@ namespace Net
     {
         int peerId = 0;
         bool active = false;
+        bool helloReceived = false;
+        bool welcomeReceived = false;
         double lastRttMs = -1.0;
         double avgRttMs = -1.0;
         double jitterMs = 0.0;

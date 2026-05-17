@@ -344,6 +344,9 @@ namespace Net
 
         for (auto& peer : m_peers)
         {
+            if (peer.welcomeReceived)
+                continue;
+
             peer.helloTimerSec += dt;
             if (peer.helloTimerSec < HELLO_INTERVAL_SEC)
                 continue;
@@ -634,7 +637,9 @@ namespace Net
         {
         case MsgType::HELLO:
         {
-            std::cout << "Received HELLO from peer " << (int)hdr->peerId << "\n";
+            if (!peer->helloReceived)
+                std::cout << "Received HELLO from peer " << (int)hdr->peerId << "\n";
+            peer->helloReceived = true;
 
             MsgHeader reply{};
             reply.msgType = (uint8_t)MsgType::WELCOME;
@@ -647,7 +652,9 @@ namespace Net
 
         case MsgType::WELCOME:
         {
-            std::cout << "Received WELCOME from peer " << (int)hdr->peerId << "\n";
+            if (!peer->welcomeReceived)
+                std::cout << "Received WELCOME from peer " << (int)hdr->peerId << "\n";
+            peer->welcomeReceived = true;
             break;
         }
 
@@ -1084,6 +1091,8 @@ namespace Net
             PeerDebugInfo row{};
             row.peerId = peer.peerId;
             row.active = peer.active;
+            row.helloReceived = peer.helloReceived;
+            row.welcomeReceived = peer.welcomeReceived;
             row.lastRttMs = peer.lastRttMs;
             row.avgRttMs = peer.avgRttMs;
             row.jitterMs = peer.jitterMs;
@@ -1199,6 +1208,12 @@ namespace Net
 
             for (auto& peer : m_peers)
             {
+                if (!peer.active && !peer.helloReceived && !peer.welcomeReceived)
+                {
+                    ++m_stats.snapshotPacketsSkippedInactivePeer;
+                    continue;
+                }
+
                 if (ShouldDropSnapshotPacket())
                 {
                     ++m_stats.snapshotPacketsDropped;

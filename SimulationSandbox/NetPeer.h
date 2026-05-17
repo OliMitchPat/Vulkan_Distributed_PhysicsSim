@@ -35,6 +35,8 @@ namespace Net
         uint32_t nextSeq = 1;
         bool active = false;
         float helloTimerSec = 0.0f;
+        bool helloReceived = false;
+        bool welcomeReceived = false;
         std::unordered_set<uint32_t> receivedReliableSeqs;
         std::deque<uint32_t> receivedReliableSeqOrder;
         std::vector<PendingMessage> resendQueue;

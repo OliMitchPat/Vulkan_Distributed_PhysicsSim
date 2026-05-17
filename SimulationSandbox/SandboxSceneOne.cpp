@@ -3223,6 +3223,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     NET_ROW("Snapshot packets received", netStats.snapshotPacketsReceived);
                     NET_ROW("Snapshot packets dropped", netStats.snapshotPacketsDropped);
                     NET_ROW("Snapshot packets delayed", netStats.snapshotPacketsDelayed);
+                    NET_ROW("Snapshots skipped inactive peer", netStats.snapshotPacketsSkippedInactivePeer);
                     NET_ROW("Global commands sent", netStats.globalCommandsSent);
                     NET_ROW("Global commands received", netStats.globalCommandsReceived);
                     NET_ROW("Spawn packets sent", netStats.spawnPacketsSent);
@@ -3239,10 +3240,12 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
                 ImGui::SeparatorText("Peer Latency / Wi-Fi Debug");
                 ImGui::TextWrapped("RTT is measured with lightweight peer-to-peer ping/pong packets on the control socket.");
-                if (ImGui::BeginTable("PeerLatencyTable", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+                if (ImGui::BeginTable("PeerLatencyTable", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
                 {
                     ImGui::TableSetupColumn("Peer");
                     ImGui::TableSetupColumn("Active");
+                    ImGui::TableSetupColumn("HELLO");
+                    ImGui::TableSetupColumn("WELCOME");
                     ImGui::TableSetupColumn("Last RTT");
                     ImGui::TableSetupColumn("Avg RTT");
                     ImGui::TableSetupColumn("Jitter");
@@ -3256,16 +3259,18 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                         ImGui::TableNextRow();
                         ImGui::TableSetColumnIndex(0); ImGui::Text("%d", peerInfo.peerId);
                         ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(peerInfo.active ? "yes" : "no");
-                        ImGui::TableSetColumnIndex(2);
+                        ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(peerInfo.helloReceived ? "yes" : "no");
+                        ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(peerInfo.welcomeReceived ? "yes" : "no");
+                        ImGui::TableSetColumnIndex(4);
                         if (peerInfo.lastRttMs >= 0.0) ImGui::Text("%.1f ms", peerInfo.lastRttMs);
                         else ImGui::TextUnformatted("--");
-                        ImGui::TableSetColumnIndex(3);
+                        ImGui::TableSetColumnIndex(5);
                         if (peerInfo.avgRttMs >= 0.0) ImGui::Text("%.1f ms", peerInfo.avgRttMs);
                         else ImGui::TextUnformatted("--");
-                        ImGui::TableSetColumnIndex(4); ImGui::Text("%.1f ms", peerInfo.jitterMs);
-                        ImGui::TableSetColumnIndex(5); ImGui::Text("%u", peerInfo.pingsSent);
-                        ImGui::TableSetColumnIndex(6); ImGui::Text("%u", peerInfo.pongsReceived);
-                        ImGui::TableSetColumnIndex(7); ImGui::Text("%u", peerInfo.pingsTimedOut);
+                        ImGui::TableSetColumnIndex(6); ImGui::Text("%.1f ms", peerInfo.jitterMs);
+                        ImGui::TableSetColumnIndex(7); ImGui::Text("%u", peerInfo.pingsSent);
+                        ImGui::TableSetColumnIndex(8); ImGui::Text("%u", peerInfo.pongsReceived);
+                        ImGui::TableSetColumnIndex(9); ImGui::Text("%u", peerInfo.pingsTimedOut);
                     }
 
                     if (peerDebugInfo.empty())

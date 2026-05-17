@@ -160,6 +160,15 @@ namespace Net
         socket.Send(peer.controlAddr, peer.controlAddrLen, &ack, (int)sizeof(ack));
     }
 
+    static void SendHelloToPeer(UdpSocket& socket, Peer& peer, int localPeerId)
+    {
+        MsgHeader msg{};
+        msg.msgType = (uint8_t)MsgType::HELLO;
+        msg.peerId = (uint8_t)localPeerId;
+
+        socket.Send(peer.controlAddr, peer.controlAddrLen, &msg, (int)sizeof(msg));
+    }
+
     // ============================================================
     // Reliable send helper
     //
@@ -274,7 +283,7 @@ namespace Net
         msg.peerId = (uint8_t)m_localPeerId;
 
         for (auto& p : m_peers)
-            m_controlSocket.Send(p.controlAddr, p.controlAddrLen, &msg, (int)sizeof(msg));
+            SendHelloToPeer(m_controlSocket, p, m_localPeerId);
     }
 
     // ============================================================
@@ -312,8 +321,27 @@ namespace Net
 
         UpdateReliableResendsOnControlSocket(dt);
         SendDiscoveryPackets(dt);
+        SendHelloPackets(dt);
         SendPingPackets(dt);
         DeliverDelayedOutgoingSnapshotsWithBudget(dt);
+    }
+
+    void NetworkingSystem::SendHelloPackets(float dt)
+    {
+        constexpr float HELLO_INTERVAL_SEC = 1.0f;
+
+        for (auto& peer : m_peers)
+        {
+            if (peer.active)
+                continue;
+
+            peer.helloTimerSec += dt;
+            if (peer.helloTimerSec < HELLO_INTERVAL_SEC)
+                continue;
+
+            peer.helloTimerSec = 0.0f;
+            SendHelloToPeer(m_controlSocket, peer, m_localPeerId);
+        }
     }
 
     void NetworkingSystem::SendDiscoveryPackets(float dt)
@@ -815,6 +843,7 @@ namespace Net
             peer->snapshotAddr = AddressWithPort(from, payload->snapshotPort);
             peer->snapshotAddrLen = Net::SockaddrLen(peer->snapshotAddr);
             peer->active = true;
+            SendHelloToPeer(m_controlSocket, *peer, m_localPeerId);
             ++m_stats.discoveryPacketsReceived;
             ++m_stats.peersDiscovered;
 
@@ -851,6 +880,7 @@ namespace Net
             peer->snapshotAddr = AddressWithPort(from, payload->snapshotPort);
             peer->snapshotAddrLen = Net::SockaddrLen(peer->snapshotAddr);
             peer->active = true;
+            SendHelloToPeer(m_controlSocket, *peer, m_localPeerId);
             ++m_stats.discoveryPacketsReceived;
             ++m_stats.peersDiscovered;
             break;

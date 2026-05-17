@@ -114,6 +114,7 @@ namespace Net
         void ReceiveSnapshotPacketsWithBudget();
         void DeliverDelayedOutgoingSnapshotsWithBudget(float dt);
         void DeliverDelayedIncomingSnapshotsIfStillUsed(float dt);
+        void SendHelloPackets(float dt);
         void SendPingPackets(float dt);
         void SendDiscoveryPackets(float dt);
 

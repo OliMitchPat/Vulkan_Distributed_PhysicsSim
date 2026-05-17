@@ -405,6 +405,8 @@ struct SimSharedState
     Net::NetworkStats netStats{};
     std::mutex activePeerIdsMutex;
     std::vector<int> activePeerIds;
+    std::mutex peerDebugMutex;
+    std::vector<Net::PeerDebugInfo> peerDebugInfo;
     std::mutex simTimingMutex;
     SimTimingStats simTiming{};
     std::atomic<uint32_t> fixedStepsLast{ 0 };
@@ -1771,6 +1773,10 @@ static void NetworkReceiveThreadFunc(
                 std::lock_guard<std::mutex> lk(shared.activePeerIdsMutex);
                 shared.activePeerIds = runtime.net.GetActivePeerIds();
             }
+            {
+                std::lock_guard<std::mutex> lk(shared.peerDebugMutex);
+                shared.peerDebugInfo = runtime.net.GetPeerDebugInfo();
+            }
         }
 
         {
@@ -1996,6 +2002,10 @@ static void NetworkSendThreadFunc(
             {
                 std::lock_guard<std::mutex> lk(shared.activePeerIdsMutex);
                 shared.activePeerIds = runtime.net.GetActivePeerIds();
+            }
+            {
+                std::lock_guard<std::mutex> lk(shared.peerDebugMutex);
+                shared.peerDebugInfo = runtime.net.GetPeerDebugInfo();
             }
         }
 
@@ -2897,6 +2907,12 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 flockStats = shared.flockingStats;
             }
 
+            std::vector<Net::PeerDebugInfo> peerDebugInfo;
+            {
+                std::lock_guard<std::mutex> lk(shared.peerDebugMutex);
+                peerDebugInfo = shared.peerDebugInfo;
+            }
+
             std::vector<int> simCores;
             {
                 std::lock_guard<std::mutex> lk(shared.simWorkerCoresMutex);
@@ -3166,6 +3182,48 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 #undef NET_ROW
                     ImGui::EndTable();
                 }
+
+                ImGui::SeparatorText("Peer Latency / Wi-Fi Debug");
+                ImGui::TextWrapped("RTT is measured with lightweight peer-to-peer ping/pong packets on the control socket.");
+                if (ImGui::BeginTable("PeerLatencyTable", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+                {
+                    ImGui::TableSetupColumn("Peer");
+                    ImGui::TableSetupColumn("Active");
+                    ImGui::TableSetupColumn("Last RTT");
+                    ImGui::TableSetupColumn("Avg RTT");
+                    ImGui::TableSetupColumn("Jitter");
+                    ImGui::TableSetupColumn("Sent");
+                    ImGui::TableSetupColumn("Replies");
+                    ImGui::TableSetupColumn("Timeouts");
+                    ImGui::TableHeadersRow();
+
+                    for (const auto& peerInfo : peerDebugInfo)
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::Text("%d", peerInfo.peerId);
+                        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(peerInfo.active ? "yes" : "no");
+                        ImGui::TableSetColumnIndex(2);
+                        if (peerInfo.lastRttMs >= 0.0) ImGui::Text("%.1f ms", peerInfo.lastRttMs);
+                        else ImGui::TextUnformatted("--");
+                        ImGui::TableSetColumnIndex(3);
+                        if (peerInfo.avgRttMs >= 0.0) ImGui::Text("%.1f ms", peerInfo.avgRttMs);
+                        else ImGui::TextUnformatted("--");
+                        ImGui::TableSetColumnIndex(4); ImGui::Text("%.1f ms", peerInfo.jitterMs);
+                        ImGui::TableSetColumnIndex(5); ImGui::Text("%u", peerInfo.pingsSent);
+                        ImGui::TableSetColumnIndex(6); ImGui::Text("%u", peerInfo.pongsReceived);
+                        ImGui::TableSetColumnIndex(7); ImGui::Text("%u", peerInfo.pingsTimedOut);
+                    }
+
+                    if (peerDebugInfo.empty())
+                    {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextDisabled("No configured remote peers");
+                    }
+
+                    ImGui::EndTable();
+                }
+                ImGui::TextDisabled("Guide: wired/LAN should be low and steady; Wi-Fi trouble usually shows higher jitter or timeouts.");
 
                 ImGui::SeparatorText("Network Impairment (Local)");
                 bool impairOn = shared.netImpairmentEnabled.load(std::memory_order_relaxed);

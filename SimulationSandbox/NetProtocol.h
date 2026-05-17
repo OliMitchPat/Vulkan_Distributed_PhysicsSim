@@ -3,7 +3,7 @@
 
 namespace Net
 {
-    static constexpr uint32_t PROTOCOL_VERSION = 3;
+    static constexpr uint32_t PROTOCOL_VERSION = 4;
 
     enum class MsgType : uint8_t
     {
@@ -12,7 +12,9 @@ namespace Net
         GLOBAL_COMMAND,
         STATE_SNAPSHOT,
         ACK,
-        SPAWN_OBJECT
+        SPAWN_OBJECT,
+        PING,
+        PONG
     };
 
 #pragma pack(push, 1)
@@ -68,6 +70,12 @@ namespace Net
         NetQuat  rot;
         NetVec3  linVel;
         NetVec3  angVel;
+    };
+
+    struct PingPayload
+    {
+        uint32_t pingId = 0;
+        double senderTimeSec = 0.0;
     };
 
     enum class SpawnShapeType : uint8_t

@@ -8,6 +8,7 @@
 #include <deque>
 #include <cstdint>
 #include <vector>
+#include <unordered_map>
 
 namespace Net
 {
@@ -34,6 +35,16 @@ namespace Net
         std::unordered_set<uint32_t> receivedReliableSeqs;
         std::deque<uint32_t> receivedReliableSeqOrder;
         std::vector<PendingMessage> resendQueue;
+
+        float pingTimerSec = 0.0f;
+        uint32_t nextPingId = 1;
+        uint32_t pingsSent = 0;
+        uint32_t pongsReceived = 0;
+        uint32_t pingsTimedOut = 0;
+        double lastRttMs = -1.0;
+        double avgRttMs = -1.0;
+        double jitterMs = 0.0;
+        std::unordered_map<uint32_t, double> pendingPings;
     };
 
 #pragma pack(push, 1)

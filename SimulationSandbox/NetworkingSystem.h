@@ -38,6 +38,19 @@ namespace Net
         float dropPercent = 0.0f;
     };
 
+    struct PeerDebugInfo
+    {
+        int peerId = 0;
+        bool active = false;
+        double lastRttMs = -1.0;
+        double avgRttMs = -1.0;
+        double jitterMs = 0.0;
+        uint32_t pingsSent = 0;
+        uint32_t pongsReceived = 0;
+        uint32_t pingsTimedOut = 0;
+        uint32_t pendingPings = 0;
+    };
+
     class NetworkingSystem
     {
     public:
@@ -45,6 +58,7 @@ namespace Net
         void Shutdown();
         NetworkStats GetStats() const;
         std::vector<int> GetActivePeerIds() const;
+        std::vector<PeerDebugInfo> GetPeerDebugInfo() const;
         void Update(float dt);
         void UpdateReceive(float dt);
         void UpdateSend(float dt);
@@ -97,6 +111,7 @@ namespace Net
         void ReceiveSnapshotPacketsWithBudget();
         void DeliverDelayedOutgoingSnapshotsWithBudget(float dt);
         void DeliverDelayedIncomingSnapshotsIfStillUsed(float dt);
+        void SendPingPackets(float dt);
 
         void SendGlobalCommand(const GlobalCommandPayload& payload);
         bool ShouldDropSnapshotPacket() const;

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace Net
@@ -13,6 +14,12 @@ namespace Net
     constexpr int MAX_SNAPSHOT_PACKETS_PER_UPDATE = 64;
     constexpr int MAX_DELAYED_SNAPSHOT_SENDS_PER_UPDATE = 32;
     constexpr size_t MAX_DELAYED_OUTGOING_SNAPSHOTS = 256;
+
+    static double NowSeconds()
+    {
+        using clock = std::chrono::steady_clock;
+        return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+    }
 
     // ============================================================
     // Endpoint comparison + peer lookup helpers
@@ -280,7 +287,57 @@ namespace Net
         }
 
         UpdateReliableResendsOnControlSocket(dt);
+        SendPingPackets(dt);
         DeliverDelayedOutgoingSnapshotsWithBudget(dt);
+    }
+
+    void NetworkingSystem::SendPingPackets(float dt)
+    {
+        constexpr float PING_INTERVAL_SEC = 1.0f;
+        constexpr double PING_TIMEOUT_SEC = 3.0;
+        const double nowSec = NowSeconds();
+
+        for (auto& peer : m_peers)
+        {
+            for (auto it = peer.pendingPings.begin(); it != peer.pendingPings.end();)
+            {
+                if ((nowSec - it->second) > PING_TIMEOUT_SEC)
+                {
+                    it = peer.pendingPings.erase(it);
+                    ++peer.pingsTimedOut;
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+
+            peer.pingTimerSec += dt;
+            if (peer.pingTimerSec < PING_INTERVAL_SEC)
+                continue;
+
+            peer.pingTimerSec = 0.0f;
+
+            struct PingPacket
+            {
+                MsgHeader header;
+                PingPayload payload;
+            } packet{};
+
+            packet.header.msgType = (uint8_t)MsgType::PING;
+            packet.header.peerId = (uint8_t)m_localPeerId;
+            packet.payload.pingId = peer.nextPingId++;
+            packet.payload.senderTimeSec = nowSec;
+
+            peer.pendingPings[packet.payload.pingId] = nowSec;
+            ++peer.pingsSent;
+
+            m_controlSocket.Send(
+                peer.controlAddr,
+                peer.controlAddrLen,
+                &packet,
+                (int)sizeof(packet));
+        }
     }
 
     // ============================================================
@@ -639,6 +696,53 @@ namespace Net
             break;
         }
 
+        case MsgType::PING:
+        {
+            if (size < (int)sizeof(MsgHeader) + (int)sizeof(PingPayload))
+                break;
+
+            struct PongPacket
+            {
+                MsgHeader header;
+                PingPayload payload;
+            } reply{};
+
+            reply.header.msgType = (uint8_t)MsgType::PONG;
+            reply.header.peerId = (uint8_t)m_localPeerId;
+            reply.payload = *reinterpret_cast<const PingPayload*>(data + sizeof(MsgHeader));
+
+            m_controlSocket.Send(
+                peer->controlAddr,
+                peer->controlAddrLen,
+                &reply,
+                (int)sizeof(reply));
+            break;
+        }
+
+        case MsgType::PONG:
+        {
+            if (size < (int)sizeof(MsgHeader) + (int)sizeof(PingPayload))
+                break;
+
+            const PingPayload* payload =
+                reinterpret_cast<const PingPayload*>(data + sizeof(MsgHeader));
+
+            const auto pending = peer->pendingPings.find(payload->pingId);
+            if (pending == peer->pendingPings.end())
+                break;
+
+            const double nowSec = NowSeconds();
+            const double rttMs = std::max(0.0, (nowSec - pending->second) * 1000.0);
+            peer->pendingPings.erase(pending);
+
+            const double oldAvg = peer->avgRttMs;
+            peer->lastRttMs = rttMs;
+            peer->avgRttMs = oldAvg < 0.0 ? rttMs : oldAvg + (rttMs - oldAvg) * 0.15;
+            peer->jitterMs = oldAvg < 0.0 ? 0.0 : peer->jitterMs + (std::abs(rttMs - oldAvg) - peer->jitterMs) * 0.15;
+            ++peer->pongsReceived;
+            break;
+        }
+
         default:
             break;
         }
@@ -802,6 +906,29 @@ namespace Net
                 ids.push_back(peer.peerId);
         }
         return ids;
+    }
+
+    std::vector<PeerDebugInfo> NetworkingSystem::GetPeerDebugInfo() const
+    {
+        std::vector<PeerDebugInfo> info;
+        info.reserve(m_peers.size());
+
+        for (const auto& peer : m_peers)
+        {
+            PeerDebugInfo row{};
+            row.peerId = peer.peerId;
+            row.active = peer.active;
+            row.lastRttMs = peer.lastRttMs;
+            row.avgRttMs = peer.avgRttMs;
+            row.jitterMs = peer.jitterMs;
+            row.pingsSent = peer.pingsSent;
+            row.pongsReceived = peer.pongsReceived;
+            row.pingsTimedOut = peer.pingsTimedOut;
+            row.pendingPings = (uint32_t)peer.pendingPings.size();
+            info.push_back(row);
+        }
+
+        return info;
     }
 
     // ============================================================

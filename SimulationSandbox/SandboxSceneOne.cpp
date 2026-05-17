@@ -351,7 +351,7 @@ struct SimSharedState
     std::atomic<bool>  stepOnce{ false };
     std::atomic<bool>  useFixedTimestep{ true };
     std::atomic<float> fixedDt{ 1.0f / 60.0f };
-    std::atomic<int>   integratorType{ 0 };   // IntegratorType enum value
+    std::atomic<int>   integratorType{ static_cast<int>(IntegratorType::SemiImplicitEuler) };
 
     // Scene switching: render thread writes, sim thread reads and acts
     std::atomic<int> requestedSceneIndex{ -1 };
@@ -1244,7 +1244,10 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
 
                 auto* phys = world.getComponent<PhysicsComponent>(e);
                 auto* tr = world.getComponent<TransformComponent>(e);
-                if (!phys || !tr) continue;
+                auto* vel = world.getComponent<VelocityComponent>(e);
+                auto* flock = world.getComponent<FlockingComponent>(e);
+                if (!tr) continue;
+                if (!phys && !flock) continue;
 
                 // Don't override authoritative bodies
                 auto* owner = world.getComponent<OwnerComponent>(e);
@@ -1280,22 +1283,31 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     << target.linVel.z << ")"
                     << " smoothing=" << (smoothingEnabled ? "yes" : "no")
                     << "\n";
-                    */
+                */
                 if (!smoothingEnabled)
                 {
-                    phys->body.SetPosition(target.pos);
-                    phys->body.SetOrientation(target.rot);
-                    phys->body.SetLinearVelocity(target.linVel);
-                    phys->body.SetAngularVelocity(target.angVel);
+                    if (phys)
+                    {
+                        phys->body.SetPosition(target.pos);
+                        phys->body.SetOrientation(target.rot);
+                        phys->body.SetLinearVelocity(target.linVel);
+                        phys->body.SetAngularVelocity(target.angVel);
+                    }
+                    if (vel)
+                    {
+                        vel->linearVelocity = target.linVel;
+                        vel->angularVelocity = target.angVel;
+                    }
                     tr->position = target.pos;
                     tr->rotation = glm::eulerAngles(target.rot);
+                    tr->orientation = target.rot;
                     continue;
                 }
 
-                const glm::vec3 currentPos = phys->body.Position();
-                const glm::quat currentRot = phys->body.Orientation();
-                const glm::vec3 currentLinVel = phys->body.LinearVelocity();
-                const glm::vec3 currentAngVel = phys->body.AngularVelocity();
+                const glm::vec3 currentPos = phys ? phys->body.Position() : tr->position;
+                const glm::quat currentRot = phys ? phys->body.Orientation() : tr->orientation;
+                const glm::vec3 currentLinVel = phys ? phys->body.LinearVelocity() : (vel ? vel->linearVelocity : glm::vec3{ 0.0f });
+                const glm::vec3 currentAngVel = phys ? phys->body.AngularVelocity() : (vel ? vel->angularVelocity : glm::vec3{ 0.0f });
 
                 const float posError = glm::length(target.pos - currentPos);
                 const bool largeError = posError > correctionThreshold;
@@ -1311,13 +1323,22 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                 const glm::vec3 smoothLinVel = glm::mix(currentLinVel, target.linVel, blend);
                 const glm::vec3 smoothAngVel = glm::mix(currentAngVel, target.angVel, blend);
 
-                phys->body.SetPosition(smoothPos);
-                phys->body.SetOrientation(smoothRot);
-                phys->body.SetLinearVelocity(smoothLinVel);
-                phys->body.SetAngularVelocity(smoothAngVel);
+                if (phys)
+                {
+                    phys->body.SetPosition(smoothPos);
+                    phys->body.SetOrientation(smoothRot);
+                    phys->body.SetLinearVelocity(smoothLinVel);
+                    phys->body.SetAngularVelocity(smoothAngVel);
+                }
+                if (vel)
+                {
+                    vel->linearVelocity = smoothLinVel;
+                    vel->angularVelocity = smoothAngVel;
+                }
 
                 tr->position = smoothPos;
                 tr->rotation = glm::eulerAngles(smoothRot);
+                tr->orientation = smoothRot;
             }
         }
 
@@ -1639,6 +1660,34 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     it.rot = { q.x, q.y, q.z, q.w };
                     it.linVel = { v.x, v.y, v.z };
                     it.angVel = { w.x, w.y, w.z };
+
+                    items.push_back(it);
+                });
+
+            world.forEach<FlockingComponent>([&](Entity e, FlockingComponent& flock)
+                {
+                    if (!flock.enabled)
+                        return;
+
+                    auto* owner = world.getComponent<OwnerComponent>(e);
+                    auto* tr = world.getComponent<TransformComponent>(e);
+                    auto* vel = world.getComponent<VelocityComponent>(e);
+                    if (!owner || !tr || !vel)
+                        return;
+
+                    if (owner->ownerId != localPeerId - 1)
+                        return;
+
+                    // Flocking boids are intentionally not PhysicsComponent bodies,
+                    // but their owner still needs to replicate transform/velocity.
+                    Net::StateSnapshotItem it{};
+                    it.objectId = (uint32_t)e;
+
+                    const glm::quat q = glm::normalize(tr->orientation);
+                    it.pos = { tr->position.x, tr->position.y, tr->position.z };
+                    it.rot = { q.x, q.y, q.z, q.w };
+                    it.linVel = { vel->linearVelocity.x, vel->linearVelocity.y, vel->linearVelocity.z };
+                    it.angVel = { vel->angularVelocity.x, vel->angularVelocity.y, vel->angularVelocity.z };
 
                     items.push_back(it);
                 });
@@ -3178,6 +3227,9 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     NET_ROW("Spawn packets sent", netStats.spawnPacketsSent);
                     NET_ROW("Spawn packets received", netStats.spawnPacketsReceived);
                     NET_ROW("Reliable resends", netStats.reliableResends);
+                    NET_ROW("Discovery packets sent", netStats.discoveryPacketsSent);
+                    NET_ROW("Discovery packets received", netStats.discoveryPacketsReceived);
+                    NET_ROW("Peer discovery updates", netStats.peersDiscovered);
                     NET_ROW("Stale replica updates ignored", shared.staleReplicaPacketsIgnored.load(std::memory_order_relaxed));
 #undef NET_ROW
                     ImGui::EndTable();

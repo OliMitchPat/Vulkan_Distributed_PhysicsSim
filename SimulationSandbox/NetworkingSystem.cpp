@@ -81,6 +81,26 @@ namespace Net
         return nullptr;
     }
 
+    static void SetSockaddrPort(sockaddr_storage& addr, uint16_t port)
+    {
+        if (addr.ss_family == AF_INET)
+        {
+            auto* in = reinterpret_cast<sockaddr_in*>(&addr);
+            in->sin_port = htons(port);
+        }
+        else if (addr.ss_family == AF_INET6)
+        {
+            auto* in = reinterpret_cast<sockaddr_in6*>(&addr);
+            in->sin6_port = htons(port);
+        }
+    }
+
+    static sockaddr_storage AddressWithPort(sockaddr_storage addr, uint16_t port)
+    {
+        SetSockaddrPort(addr, port);
+        return addr;
+    }
+
     static bool PendingMessageIsType(const PendingMessage& msg, MsgType type)
     {
         if (msg.data.size() < sizeof(MsgHeader))
@@ -195,6 +215,8 @@ namespace Net
         }
 
         m_localPeerId = cfg.peer_id;
+        m_controlBindPort = cfg.control_bind_port;
+        m_snapshotBindPort = cfg.snapshot_bind_port;
 
         m_peers.clear();
 
@@ -225,6 +247,8 @@ namespace Net
             peer.controlAddrLen = Net::SockaddrLen(controlAddr);
             peer.snapshotAddr = snapshotAddr;
             peer.snapshotAddrLen = Net::SockaddrLen(snapshotAddr);
+            peer.configuredControlPort = p.control_port;
+            peer.configuredSnapshotPort = p.snapshot_port;
 
             m_peers.push_back(std::move(peer));
         }
@@ -287,8 +311,43 @@ namespace Net
         }
 
         UpdateReliableResendsOnControlSocket(dt);
+        SendDiscoveryPackets(dt);
         SendPingPackets(dt);
         DeliverDelayedOutgoingSnapshotsWithBudget(dt);
+    }
+
+    void NetworkingSystem::SendDiscoveryPackets(float dt)
+    {
+        constexpr float DISCOVERY_INTERVAL_SEC = 1.0f;
+
+        m_discoveryTimerSec += dt;
+        if (m_discoveryTimerSec < DISCOVERY_INTERVAL_SEC)
+            return;
+
+        m_discoveryTimerSec = 0.0f;
+
+        struct DiscoveryPacket
+        {
+            MsgHeader header;
+            DiscoveryPayload payload;
+        } packet{};
+
+        packet.header.msgType = (uint8_t)MsgType::DISCOVER_SIM_PEER;
+        packet.header.peerId = (uint8_t)m_localPeerId;
+        packet.payload.peerId = (uint8_t)m_localPeerId;
+        packet.payload.controlPort = m_controlBindPort;
+        packet.payload.snapshotPort = m_snapshotBindPort;
+
+        for (const auto& peer : m_peers)
+        {
+            sockaddr_storage broadcastAddr{};
+            std::string err;
+            if (!ResolveAddress("255.255.255.255", peer.configuredControlPort, broadcastAddr, err))
+                continue;
+
+            if (m_controlSocket.Send(broadcastAddr, Net::SockaddrLen(broadcastAddr), &packet, (int)sizeof(packet)))
+                ++m_stats.discoveryPacketsSent;
+        }
     }
 
     void NetworkingSystem::SendPingPackets(float dt)
@@ -740,6 +799,60 @@ namespace Net
             peer->avgRttMs = oldAvg < 0.0 ? rttMs : oldAvg + (rttMs - oldAvg) * 0.15;
             peer->jitterMs = oldAvg < 0.0 ? 0.0 : peer->jitterMs + (std::abs(rttMs - oldAvg) - peer->jitterMs) * 0.15;
             ++peer->pongsReceived;
+            break;
+        }
+
+        case MsgType::DISCOVER_SIM_PEER:
+        {
+            if (size < (int)sizeof(MsgHeader) + (int)sizeof(DiscoveryPayload))
+                break;
+
+            const DiscoveryPayload* payload =
+                reinterpret_cast<const DiscoveryPayload*>(data + sizeof(MsgHeader));
+
+            peer->controlAddr = AddressWithPort(from, payload->controlPort);
+            peer->controlAddrLen = Net::SockaddrLen(peer->controlAddr);
+            peer->snapshotAddr = AddressWithPort(from, payload->snapshotPort);
+            peer->snapshotAddrLen = Net::SockaddrLen(peer->snapshotAddr);
+            peer->active = true;
+            ++m_stats.discoveryPacketsReceived;
+            ++m_stats.peersDiscovered;
+
+            struct DiscoveryPacket
+            {
+                MsgHeader header;
+                DiscoveryPayload payload;
+            } reply{};
+
+            reply.header.msgType = (uint8_t)MsgType::PEER_HERE;
+            reply.header.peerId = (uint8_t)m_localPeerId;
+            reply.payload.peerId = (uint8_t)m_localPeerId;
+            reply.payload.controlPort = m_controlBindPort;
+            reply.payload.snapshotPort = m_snapshotBindPort;
+
+            m_controlSocket.Send(
+                peer->controlAddr,
+                peer->controlAddrLen,
+                &reply,
+                (int)sizeof(reply));
+            break;
+        }
+
+        case MsgType::PEER_HERE:
+        {
+            if (size < (int)sizeof(MsgHeader) + (int)sizeof(DiscoveryPayload))
+                break;
+
+            const DiscoveryPayload* payload =
+                reinterpret_cast<const DiscoveryPayload*>(data + sizeof(MsgHeader));
+
+            peer->controlAddr = AddressWithPort(from, payload->controlPort);
+            peer->controlAddrLen = Net::SockaddrLen(peer->controlAddr);
+            peer->snapshotAddr = AddressWithPort(from, payload->snapshotPort);
+            peer->snapshotAddrLen = Net::SockaddrLen(peer->snapshotAddr);
+            peer->active = true;
+            ++m_stats.discoveryPacketsReceived;
+            ++m_stats.peersDiscovered;
             break;
         }
 

@@ -356,7 +356,7 @@ private:
         }
     }
 
-    IntegratorType m_integrator = IntegratorType::Euler;
+    IntegratorType m_integrator = IntegratorType::SemiImplicitEuler;
     bool m_gravityEnabled = true;
     int m_workerCount = 1;
     std::vector<int> m_workerCores;

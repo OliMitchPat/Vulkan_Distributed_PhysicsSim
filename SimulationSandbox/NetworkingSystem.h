@@ -28,6 +28,9 @@ namespace Net
 
         uint32_t delayedOutgoingSnapshotPackets = 0;
         uint32_t delayedIncomingSnapshotPackets = 0;
+        uint32_t discoveryPacketsSent = 0;
+        uint32_t discoveryPacketsReceived = 0;
+        uint32_t peersDiscovered = 0;
     };
 
     struct SnapshotImpairmentSettings
@@ -112,6 +115,7 @@ namespace Net
         void DeliverDelayedOutgoingSnapshotsWithBudget(float dt);
         void DeliverDelayedIncomingSnapshotsIfStillUsed(float dt);
         void SendPingPackets(float dt);
+        void SendDiscoveryPackets(float dt);
 
         void SendGlobalCommand(const GlobalCommandPayload& payload);
         bool ShouldDropSnapshotPacket() const;
@@ -162,6 +166,9 @@ namespace Net
         std::vector<DelayedOutgoingSnapshot> m_delayedOutgoingSnapshots;
         std::vector<DelayedIncomingSnapshot> m_delayedIncomingSnapshots;
         float m_snapshotPauseSeconds = 0.0f;
+        uint16_t m_controlBindPort = 0;
+        uint16_t m_snapshotBindPort = 0;
+        float m_discoveryTimerSec = 0.0f;
 
         // Used to send large snapshots over several network ticks instead of all at once.
         uint32_t m_snapshotSendCursor = 0;

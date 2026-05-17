@@ -14,7 +14,9 @@ namespace Net
         ACK,
         SPAWN_OBJECT,
         PING,
-        PONG
+        PONG,
+        DISCOVER_SIM_PEER,
+        PEER_HERE
     };
 
 #pragma pack(push, 1)
@@ -76,6 +78,15 @@ namespace Net
     {
         uint32_t pingId = 0;
         double senderTimeSec = 0.0;
+    };
+
+    struct DiscoveryPayload
+    {
+        uint8_t peerId = 0;
+        uint8_t reserved0 = 0;
+        uint16_t reserved1 = 0;
+        uint16_t controlPort = 0;
+        uint16_t snapshotPort = 0;
     };
 
     enum class SpawnShapeType : uint8_t

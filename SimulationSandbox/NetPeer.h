@@ -29,6 +29,8 @@ namespace Net
 
         sockaddr_storage snapshotAddr{};
         int snapshotAddrLen = 0;
+        uint16_t configuredControlPort = 0;
+        uint16_t configuredSnapshotPort = 0;
 
         uint32_t nextSeq = 1;
         bool active = false;

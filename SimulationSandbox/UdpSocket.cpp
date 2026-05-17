@@ -47,6 +47,13 @@ namespace Net
                 reinterpret_cast<const char*>(&reuse), sizeof(reuse));
         }
 
+        // Needed for LAN peer discovery broadcasts. Harmless for ordinary unicast sends.
+        {
+            int broadcast = 1;
+            setsockopt(m_socket, SOL_SOCKET, SO_BROADCAST,
+                reinterpret_cast<const char*>(&broadcast), sizeof(broadcast));
+        }
+
         // Increase UDP buffers to reduce packet drops when snapshots flood the socket.
         // Windows may clamp these values, but even a smaller applied size helps.
         {

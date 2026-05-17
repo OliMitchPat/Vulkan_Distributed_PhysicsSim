@@ -344,9 +344,6 @@ namespace Net
 
         for (auto& peer : m_peers)
         {
-            if (peer.active)
-                continue;
-
             peer.helloTimerSec += dt;
             if (peer.helloTimerSec < HELLO_INTERVAL_SEC)
                 continue;

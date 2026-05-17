@@ -3230,6 +3230,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     NET_ROW("Discovery packets sent", netStats.discoveryPacketsSent);
                     NET_ROW("Discovery packets received", netStats.discoveryPacketsReceived);
                     NET_ROW("Peer discovery updates", netStats.peersDiscovered);
+                    NET_ROW("Endpoints learned from control", netStats.endpointsLearnedFromControl);
                     NET_ROW("Stale replica updates ignored", shared.staleReplicaPacketsIgnored.load(std::memory_order_relaxed));
 #undef NET_ROW
                     ImGui::EndTable();

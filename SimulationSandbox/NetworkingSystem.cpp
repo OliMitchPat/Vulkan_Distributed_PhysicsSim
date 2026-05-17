@@ -101,6 +101,18 @@ namespace Net
         return addr;
     }
 
+    static void LearnPeerAddressesFromControlSource(Peer& peer, const sockaddr_storage& from)
+    {
+        peer.controlAddr = from;
+        peer.controlAddrLen = Net::SockaddrLen(peer.controlAddr);
+
+        if (peer.configuredSnapshotPort != 0)
+        {
+            peer.snapshotAddr = AddressWithPort(from, peer.configuredSnapshotPort);
+            peer.snapshotAddrLen = Net::SockaddrLen(peer.snapshotAddr);
+        }
+    }
+
     static bool PendingMessageIsType(const PendingMessage& msg, MsgType type)
     {
         if (msg.data.size() < sizeof(MsgHeader))
@@ -590,14 +602,21 @@ namespace Net
 
             if (channel == PacketChannel::Control)
             {
-                peer->controlAddr = from;
-                peer->controlAddrLen = Net::SockaddrLen(from);
+                LearnPeerAddressesFromControlSource(*peer, from);
             }
             else
             {
                 peer->snapshotAddr = from;
                 peer->snapshotAddrLen = Net::SockaddrLen(from);
             }
+        }
+        else if (channel == PacketChannel::Control)
+        {
+            // LAN discovery may be blocked while broadcast/global control traffic still
+            // reaches this socket. Any valid control packet reveals the peer's real
+            // source IP, so use it to repair both control and snapshot endpoints.
+            LearnPeerAddressesFromControlSource(*peer, from);
+            ++m_stats.endpointsLearnedFromControl;
         }
         peer->active = true;
 

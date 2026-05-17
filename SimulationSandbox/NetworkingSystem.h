@@ -31,6 +31,7 @@ namespace Net
         uint32_t discoveryPacketsSent = 0;
         uint32_t discoveryPacketsReceived = 0;
         uint32_t peersDiscovered = 0;
+        uint32_t endpointsLearnedFromControl = 0;
     };
 
     struct SnapshotImpairmentSettings

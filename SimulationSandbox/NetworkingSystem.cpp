@@ -628,8 +628,8 @@ namespace Net
         peer->active = true;
 
         const MsgType msgType = (MsgType)hdr->msgType;
-        if (channel == PacketChannel::Control && msgType == MsgType::STATE_SNAPSHOT)
-            return;
+        // STATE_SNAPSHOT normally travels over the snapshot socket, but it is
+        // also accepted on the control socket as a LAN/firewall fallback.
         if (channel == PacketChannel::Snapshot && msgType != MsgType::STATE_SNAPSHOT)
             return;
 
@@ -1250,6 +1250,19 @@ namespace Net
                     {
                         ++m_stats.snapshotPacketsSendFailed;
                     }
+                }
+
+                // Fallback path: some lab/home networks allow the control port
+                // but silently drop the separate snapshot port. Mirror snapshots
+                // over control so state replication still works when the control
+                // channel is known-good.
+                if (m_controlSocket.Send(peer.controlAddr, peer.controlAddrLen, buffer, bytes))
+                {
+                    ++m_stats.snapshotPacketsSentOnControl;
+                }
+                else
+                {
+                    ++m_stats.snapshotPacketsSendFailed;
                 }
             }
         }

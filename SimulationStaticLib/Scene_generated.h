@@ -63,6 +63,9 @@ struct AnimatedObjectBuilder;
 struct SimulatedObject;
 struct SimulatedObjectBuilder;
 
+struct FlockingSettings;
+struct FlockingSettingsBuilder;
+
 struct Object;
 struct ObjectBuilder;
 
@@ -380,6 +383,39 @@ inline const char *EnumNameObjectOwnerType(ObjectOwnerType e) {
   if (::flatbuffers::IsOutRange(e, ObjectOwnerType_ONE, ObjectOwnerType_FOUR)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesObjectOwnerType()[index];
+}
+
+enum FlockingSearchMode : int8_t {
+  FlockingSearchMode_BRUTE_FORCE = 0,
+  FlockingSearchMode_UNIFORM_GRID = 1,
+  FlockingSearchMode_OCTREE = 2,
+  FlockingSearchMode_MIN = FlockingSearchMode_BRUTE_FORCE,
+  FlockingSearchMode_MAX = FlockingSearchMode_OCTREE
+};
+
+inline const FlockingSearchMode (&EnumValuesFlockingSearchMode())[3] {
+  static const FlockingSearchMode values[] = {
+    FlockingSearchMode_BRUTE_FORCE,
+    FlockingSearchMode_UNIFORM_GRID,
+    FlockingSearchMode_OCTREE
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesFlockingSearchMode() {
+  static const char * const names[4] = {
+    "BRUTE_FORCE",
+    "UNIFORM_GRID",
+    "OCTREE",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameFlockingSearchMode(FlockingSearchMode e) {
+  if (::flatbuffers::IsOutRange(e, FlockingSearchMode_BRUTE_FORCE, FlockingSearchMode_OCTREE)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesFlockingSearchMode()[index];
 }
 
 enum CollisionType : int8_t {
@@ -1469,6 +1505,168 @@ inline ::flatbuffers::Offset<SimulatedObject> CreateSimulatedObject(
   return builder_.Finish();
 }
 
+struct FlockingSettings FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef FlockingSettingsBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_ENABLED = 4,
+    VT_DEBUG_ENABLED = 6,
+    VT_FLOCK_ID = 8,
+    VT_MAX_SPEED = 10,
+    VT_MAX_FORCE = 12,
+    VT_PERCEPTION_RADIUS = 14,
+    VT_SEPARATION_RADIUS = 16,
+    VT_COHESION_WEIGHT = 18,
+    VT_ALIGNMENT_WEIGHT = 20,
+    VT_SEPARATION_WEIGHT = 22,
+    VT_AVOIDANCE_WEIGHT = 24,
+    VT_BOID_RADIUS = 26,
+    VT_SEARCH_MODE = 28
+  };
+  bool enabled() const {
+    return GetField<uint8_t>(VT_ENABLED, 1) != 0;
+  }
+  bool debug_enabled() const {
+    return GetField<uint8_t>(VT_DEBUG_ENABLED, 0) != 0;
+  }
+  int32_t flock_id() const {
+    return GetField<int32_t>(VT_FLOCK_ID, 0);
+  }
+  float max_speed() const {
+    return GetField<float>(VT_MAX_SPEED, 8.0f);
+  }
+  float max_force() const {
+    return GetField<float>(VT_MAX_FORCE, 15.0f);
+  }
+  float perception_radius() const {
+    return GetField<float>(VT_PERCEPTION_RADIUS, 6.0f);
+  }
+  float separation_radius() const {
+    return GetField<float>(VT_SEPARATION_RADIUS, 1.5f);
+  }
+  float cohesion_weight() const {
+    return GetField<float>(VT_COHESION_WEIGHT, 0.8f);
+  }
+  float alignment_weight() const {
+    return GetField<float>(VT_ALIGNMENT_WEIGHT, 1.0f);
+  }
+  float separation_weight() const {
+    return GetField<float>(VT_SEPARATION_WEIGHT, 1.5f);
+  }
+  float avoidance_weight() const {
+    return GetField<float>(VT_AVOIDANCE_WEIGHT, 2.5f);
+  }
+  float boid_radius() const {
+    return GetField<float>(VT_BOID_RADIUS, 0.2f);
+  }
+  Simulation::FlockingSearchMode search_mode() const {
+    return static_cast<Simulation::FlockingSearchMode>(GetField<int8_t>(VT_SEARCH_MODE, 0));
+  }
+  template <bool B = false>
+  bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_ENABLED, 1) &&
+           VerifyField<uint8_t>(verifier, VT_DEBUG_ENABLED, 1) &&
+           VerifyField<int32_t>(verifier, VT_FLOCK_ID, 4) &&
+           VerifyField<float>(verifier, VT_MAX_SPEED, 4) &&
+           VerifyField<float>(verifier, VT_MAX_FORCE, 4) &&
+           VerifyField<float>(verifier, VT_PERCEPTION_RADIUS, 4) &&
+           VerifyField<float>(verifier, VT_SEPARATION_RADIUS, 4) &&
+           VerifyField<float>(verifier, VT_COHESION_WEIGHT, 4) &&
+           VerifyField<float>(verifier, VT_ALIGNMENT_WEIGHT, 4) &&
+           VerifyField<float>(verifier, VT_SEPARATION_WEIGHT, 4) &&
+           VerifyField<float>(verifier, VT_AVOIDANCE_WEIGHT, 4) &&
+           VerifyField<float>(verifier, VT_BOID_RADIUS, 4) &&
+           VerifyField<int8_t>(verifier, VT_SEARCH_MODE, 1) &&
+           verifier.EndTable();
+  }
+};
+
+struct FlockingSettingsBuilder {
+  typedef FlockingSettings Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_enabled(bool enabled) {
+    fbb_.AddElement<uint8_t>(FlockingSettings::VT_ENABLED, static_cast<uint8_t>(enabled), 1);
+  }
+  void add_debug_enabled(bool debug_enabled) {
+    fbb_.AddElement<uint8_t>(FlockingSettings::VT_DEBUG_ENABLED, static_cast<uint8_t>(debug_enabled), 0);
+  }
+  void add_flock_id(int32_t flock_id) {
+    fbb_.AddElement<int32_t>(FlockingSettings::VT_FLOCK_ID, flock_id, 0);
+  }
+  void add_max_speed(float max_speed) {
+    fbb_.AddElement<float>(FlockingSettings::VT_MAX_SPEED, max_speed, 8.0f);
+  }
+  void add_max_force(float max_force) {
+    fbb_.AddElement<float>(FlockingSettings::VT_MAX_FORCE, max_force, 15.0f);
+  }
+  void add_perception_radius(float perception_radius) {
+    fbb_.AddElement<float>(FlockingSettings::VT_PERCEPTION_RADIUS, perception_radius, 6.0f);
+  }
+  void add_separation_radius(float separation_radius) {
+    fbb_.AddElement<float>(FlockingSettings::VT_SEPARATION_RADIUS, separation_radius, 1.5f);
+  }
+  void add_cohesion_weight(float cohesion_weight) {
+    fbb_.AddElement<float>(FlockingSettings::VT_COHESION_WEIGHT, cohesion_weight, 0.8f);
+  }
+  void add_alignment_weight(float alignment_weight) {
+    fbb_.AddElement<float>(FlockingSettings::VT_ALIGNMENT_WEIGHT, alignment_weight, 1.0f);
+  }
+  void add_separation_weight(float separation_weight) {
+    fbb_.AddElement<float>(FlockingSettings::VT_SEPARATION_WEIGHT, separation_weight, 1.5f);
+  }
+  void add_avoidance_weight(float avoidance_weight) {
+    fbb_.AddElement<float>(FlockingSettings::VT_AVOIDANCE_WEIGHT, avoidance_weight, 2.5f);
+  }
+  void add_boid_radius(float boid_radius) {
+    fbb_.AddElement<float>(FlockingSettings::VT_BOID_RADIUS, boid_radius, 0.2f);
+  }
+  void add_search_mode(Simulation::FlockingSearchMode search_mode) {
+    fbb_.AddElement<int8_t>(FlockingSettings::VT_SEARCH_MODE, static_cast<int8_t>(search_mode), 0);
+  }
+  explicit FlockingSettingsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<FlockingSettings> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<FlockingSettings>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<FlockingSettings> CreateFlockingSettings(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    bool enabled = true,
+    bool debug_enabled = false,
+    int32_t flock_id = 0,
+    float max_speed = 8.0f,
+    float max_force = 15.0f,
+    float perception_radius = 6.0f,
+    float separation_radius = 1.5f,
+    float cohesion_weight = 0.8f,
+    float alignment_weight = 1.0f,
+    float separation_weight = 1.5f,
+    float avoidance_weight = 2.5f,
+    float boid_radius = 0.2f,
+    Simulation::FlockingSearchMode search_mode = Simulation::FlockingSearchMode_BRUTE_FORCE) {
+  FlockingSettingsBuilder builder_(_fbb);
+  builder_.add_boid_radius(boid_radius);
+  builder_.add_avoidance_weight(avoidance_weight);
+  builder_.add_separation_weight(separation_weight);
+  builder_.add_alignment_weight(alignment_weight);
+  builder_.add_cohesion_weight(cohesion_weight);
+  builder_.add_separation_radius(separation_radius);
+  builder_.add_perception_radius(perception_radius);
+  builder_.add_max_force(max_force);
+  builder_.add_max_speed(max_speed);
+  builder_.add_flock_id(flock_id);
+  builder_.add_search_mode(search_mode);
+  builder_.add_debug_enabled(debug_enabled);
+  builder_.add_enabled(enabled);
+  return builder_.Finish();
+}
+
 struct Object FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef ObjectBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
@@ -1479,7 +1677,8 @@ struct Object FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_SHAPE = 12,
     VT_BEHAVIOUR_TYPE = 14,
     VT_BEHAVIOUR = 16,
-    VT_COLLISION_TYPE = 18
+    VT_COLLISION_TYPE = 18,
+    VT_FLOCKING = 20
   };
   const ::flatbuffers::String *name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_NAME);
@@ -1531,6 +1730,9 @@ struct Object FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   Simulation::CollisionType collision_type() const {
     return static_cast<Simulation::CollisionType>(GetField<int8_t>(VT_COLLISION_TYPE, 0));
   }
+  const Simulation::FlockingSettings *flocking() const {
+    return GetPointer<const Simulation::FlockingSettings *>(VT_FLOCKING);
+  }
   template <bool B = false>
   bool Verify(::flatbuffers::VerifierTemplate<B> &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -1546,6 +1748,8 @@ struct Object FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_BEHAVIOUR) &&
            VerifyBehaviour(verifier, behaviour(), behaviour_type()) &&
            VerifyField<int8_t>(verifier, VT_COLLISION_TYPE, 1) &&
+           VerifyOffset(verifier, VT_FLOCKING) &&
+           verifier.VerifyTable(flocking()) &&
            verifier.EndTable();
   }
 };
@@ -1610,6 +1814,9 @@ struct ObjectBuilder {
   void add_collision_type(Simulation::CollisionType collision_type) {
     fbb_.AddElement<int8_t>(Object::VT_COLLISION_TYPE, static_cast<int8_t>(collision_type), 0);
   }
+  void add_flocking(::flatbuffers::Offset<Simulation::FlockingSettings> flocking) {
+    fbb_.AddOffset(Object::VT_FLOCKING, flocking);
+  }
   explicit ObjectBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1630,8 +1837,10 @@ inline ::flatbuffers::Offset<Object> CreateObject(
     ::flatbuffers::Offset<void> shape = 0,
     Simulation::Behaviour behaviour_type = Simulation::Behaviour_NONE,
     ::flatbuffers::Offset<void> behaviour = 0,
-    Simulation::CollisionType collision_type = Simulation::CollisionType_SOLID) {
+    Simulation::CollisionType collision_type = Simulation::CollisionType_SOLID,
+    ::flatbuffers::Offset<Simulation::FlockingSettings> flocking = 0) {
   ObjectBuilder builder_(_fbb);
+  builder_.add_flocking(flocking);
   builder_.add_behaviour(behaviour);
   builder_.add_shape(shape);
   builder_.add_material(material);
@@ -1652,7 +1861,8 @@ inline ::flatbuffers::Offset<Object> CreateObjectDirect(
     ::flatbuffers::Offset<void> shape = 0,
     Simulation::Behaviour behaviour_type = Simulation::Behaviour_NONE,
     ::flatbuffers::Offset<void> behaviour = 0,
-    Simulation::CollisionType collision_type = Simulation::CollisionType_SOLID) {
+    Simulation::CollisionType collision_type = Simulation::CollisionType_SOLID,
+    ::flatbuffers::Offset<Simulation::FlockingSettings> flocking = 0) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto material__ = material ? _fbb.CreateString(material) : 0;
   return Simulation::CreateObject(
@@ -1664,7 +1874,8 @@ inline ::flatbuffers::Offset<Object> CreateObjectDirect(
       shape,
       behaviour_type,
       behaviour,
-      collision_type);
+      collision_type,
+      flocking);
 }
 
 struct Material FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {

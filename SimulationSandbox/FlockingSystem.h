@@ -103,6 +103,7 @@ private:
 
     static glm::vec3 ClampLength(const glm::vec3& v, float maxLength);
     static glm::vec3 SafeNormalize(const glm::vec3& v, const glm::vec3& fallback = glm::vec3(0.0f));
+    static glm::vec3 ClosestPointOnSegment(const glm::vec3& a, const glm::vec3& b, const glm::vec3& point);
     static void WeightedTruncatedAdd(glm::vec3& total, float& remaining, const glm::vec3& force);
 
     bool ShouldUpdateEntity(World& world, Entity e) const;

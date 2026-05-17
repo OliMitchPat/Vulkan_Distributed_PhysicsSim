@@ -46,6 +46,8 @@ namespace
     constexpr float kFallbackRestitution = 0.5f;
     constexpr float kFallbackStaticFric = 0.5f;
     constexpr float kFallbackDynamicFric = 0.3f;
+    constexpr int kMinRuntimeFlockingBoids = 10;
+    constexpr int kMaxRuntimeFlockingBoids = 2000;
 
     struct ResolvedMaterial
     {
@@ -54,6 +56,31 @@ namespace
         float staticFric = kFallbackStaticFric;
         float dynamicFric = kFallbackDynamicFric;
     };
+
+    glm::vec3 RuntimeFlockingPosition(int index)
+    {
+        const float a = static_cast<float>(index) * 2.3999632f;
+        const float r = 2.0f + 0.075f * static_cast<float>(index % 140);
+        return glm::vec3(
+            std::cos(a) * r,
+            2.0f + static_cast<float>((index * 37) % 100) * 0.10f,
+            std::sin(a) * r);
+    }
+
+    glm::vec3 RuntimeFlockingVelocity(int index, float speed)
+    {
+        const float a = static_cast<float>(index) * 1.618034f;
+        glm::vec3 v(std::cos(a), 0.15f * std::sin(a * 0.7f), std::sin(a));
+        const float lenSq = glm::dot(v, v);
+        if (lenSq > 1e-6f)
+            v *= speed / std::sqrt(lenSq);
+        return v;
+    }
+
+    bool ContainsPeerId(const std::vector<int>& peerIds, int peerId)
+    {
+        return std::find(peerIds.begin(), peerIds.end(), peerId) != peerIds.end();
+    }
 
     std::string MeshNameForShape(const ShapeData& shape)
     {
@@ -494,6 +521,9 @@ void Scenario_FlatbufferScene::OnUnload(World& /*world*/)
     m_pendingSpawnEvents.clear();
     m_spawnerElapsedSec = 0.0f;
     m_nextSpawnerWakeSec = 0.0f;
+    m_hasFlockingAgents = false;
+    m_appliedFlockingBoidCount = -1;
+    m_requestedFlockingBoidCount.store(-1, std::memory_order_release);
 }
 
 void Scenario_FlatbufferScene::OnLoad(World& world)
@@ -511,6 +541,8 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
     const Simulation::Scene* scene = m_loader->GetScene();
 
     m_gravityOn = scene->gravity_on();
+    m_hasFlockingAgents = false;
+    m_appliedFlockingBoidCount = -1;
 
     if (scene->name())
         m_displayName = scene->name()->str();
@@ -623,6 +655,9 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
         // ------------------------------------------------------------
         int fbOwnerDebug = -1;
 
+        const Simulation::FlockingSettings* flockingSettings = obj->flocking();
+        const bool isFlockingAgent = flockingSettings != nullptr;
+
         if (obj->behaviour_type() == Simulation::Behaviour_SimulatedObject)
         {
             const auto* sim = obj->behaviour_as_SimulatedObject();
@@ -669,6 +704,7 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
             << " collision=" << CollisionTypeStr(obj->collision_type())
             << " material=\"" << matName << "\""
             << " shape=" << ShapeDumpStr(rawShape, uniformScale)
+            << (isFlockingAgent ? " flocking=1" : "")
             << "\n";
 
         Entity e = world.createEntity();
@@ -687,7 +723,16 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
                     ? std::clamp(static_cast<int>(sim->owner()), 0, 3)
                     : 0;
 
-                if (shouldRoundRobinSceneOwnership)
+                if (m_configuredPeerIds.size() >= 4)
+                {
+                    oc.ownerId = fbOwner;
+                }
+                else if (!m_configuredPeerIds.empty())
+                {
+                    const int mappedPeerId = m_configuredPeerIds[static_cast<size_t>(fbOwner) % m_configuredPeerIds.size()];
+                    oc.ownerId = mappedPeerId - 1;
+                }
+                else if (shouldRoundRobinSceneOwnership)
                 {
                     // Disabled for now because shouldRoundRobinSceneOwnership is false.
                     // Kept here so we can re-enable a scene-specific fallback later if needed.
@@ -720,6 +765,42 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
             world.addComponent(e, sc);
         }
 
+        if (isFlockingAgent)
+        {
+            m_hasFlockingAgents = true;
+
+            FlockingComponent flock{};
+            flock.enabled = flockingSettings->enabled();
+            flock.debugEnabled = flockingSettings->debug_enabled();
+            flock.flockId = flockingSettings->flock_id();
+            flock.maxSpeed = std::max(0.01f, flockingSettings->max_speed());
+            flock.maxForce = std::max(0.01f, flockingSettings->max_force());
+            flock.perceptionRadius = std::max(0.01f, flockingSettings->perception_radius());
+            flock.separationRadius = std::max(0.01f, flockingSettings->separation_radius());
+            flock.cohesionWeight = std::max(0.0f, flockingSettings->cohesion_weight());
+            flock.alignmentWeight = std::max(0.0f, flockingSettings->alignment_weight());
+            flock.separationWeight = std::max(0.0f, flockingSettings->separation_weight());
+            flock.avoidanceWeight = std::max(0.0f, flockingSettings->avoidance_weight());
+            flock.boidRadius = std::max(0.01f, flockingSettings->boid_radius());
+            world.addComponent(e, flock);
+
+            glm::vec3 initialLinearVelocity{ flock.maxSpeed, 0.0f, 0.0f };
+            glm::vec3 initialAngularVelocity{ 0.0f };
+            if (const auto* sim = obj->behaviour_as_SimulatedObject())
+            {
+                if (const auto* state = sim->initial_state())
+                {
+                    initialLinearVelocity = SimIO::ToGlmVec3(state->linear_velocity());
+                    initialAngularVelocity = glm::radians(SimIO::ToGlmVec3(state->angular_velocity()));
+                }
+            }
+
+            if (glm::dot(initialLinearVelocity, initialLinearVelocity) < 1e-6f)
+                initialLinearVelocity = glm::vec3(flock.maxSpeed, 0.0f, 0.0f);
+
+            world.addComponent(e, VelocityComponent{ initialLinearVelocity, initialAngularVelocity });
+        }
+
         {
             RenderMeshComponent rmc{};
             rmc.meshName = MeshNameForShape(rawShape);
@@ -749,6 +830,7 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
             world.addComponent(e, mat);
         }
 
+        if (!isFlockingAgent)
         {
             PhysicsComponent phys{};
 
@@ -864,6 +946,17 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 
     std::cout << "  Spawned " << objectCount << " object(s).\n";
 
+    if (m_hasFlockingAgents)
+    {
+        int flockingCount = 0;
+        world.forEach<FlockingComponent>([&](Entity, FlockingComponent&)
+            {
+                ++flockingCount;
+            });
+        m_appliedFlockingBoidCount = flockingCount;
+        m_requestedFlockingBoidCount.store(flockingCount, std::memory_order_release);
+    }
+
     // ------------------------------------------------------------
     // Spawner runtime reset
     //
@@ -970,6 +1063,109 @@ void Scenario_FlatbufferScene::OnLoad(World& world)
 void Scenario_FlatbufferScene::SetLocalPeerId(int peerId)
 {
     m_localPeerId = std::max(1, std::min(peerId, 4));
+    if (m_configuredPeerIds.empty())
+        m_configuredPeerIds.push_back(m_localPeerId);
+}
+
+void Scenario_FlatbufferScene::SetConfiguredPeerIds(const std::vector<int>& peerIds)
+{
+    m_configuredPeerIds.clear();
+
+    for (int peerId : peerIds)
+    {
+        peerId = std::clamp(peerId, 1, 4);
+        if (!ContainsPeerId(m_configuredPeerIds, peerId))
+            m_configuredPeerIds.push_back(peerId);
+    }
+
+    if (!ContainsPeerId(m_configuredPeerIds, m_localPeerId))
+        m_configuredPeerIds.push_back(m_localPeerId);
+
+    std::sort(m_configuredPeerIds.begin(), m_configuredPeerIds.end());
+}
+
+void Scenario_FlatbufferScene::RequestFlockingBoidCount(int count)
+{
+    m_requestedFlockingBoidCount.store(
+        std::clamp(count, kMinRuntimeFlockingBoids, kMaxRuntimeFlockingBoids),
+        std::memory_order_release);
+}
+
+void Scenario_FlatbufferScene::ApplyRuntimeFlockingBoidCount(World& world, int targetCount)
+{
+    targetCount = std::clamp(targetCount, kMinRuntimeFlockingBoids, kMaxRuntimeFlockingBoids);
+
+    std::vector<Entity> boids;
+    FlockingComponent templateFlock{};
+    bool haveTemplate = false;
+
+    world.forEach<FlockingComponent>([&](Entity e, FlockingComponent& flock)
+        {
+            boids.push_back(e);
+            if (!haveTemplate)
+            {
+                templateFlock = flock;
+                haveTemplate = true;
+            }
+        });
+
+    if (!haveTemplate)
+        return;
+
+    while (static_cast<int>(boids.size()) > targetCount)
+    {
+        world.destroyEntity(boids.back());
+        boids.pop_back();
+    }
+
+    int nextIndex = static_cast<int>(boids.size());
+    while (nextIndex < targetCount)
+    {
+        const Entity e = world.createEntity();
+        world.addComponent(e, NameComponent{ "Runtime FlatBuffer Boid " + std::to_string(nextIndex + 1) });
+
+        OwnerComponent owner{};
+        owner.ownerId = -1;
+        world.addComponent(e, owner);
+
+        TransformComponent tr{};
+        tr.position = RuntimeFlockingPosition(nextIndex);
+        tr.rotation = glm::vec3(0.0f);
+        tr.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        tr.scale = glm::vec3(1.0f);
+        world.addComponent(e, tr);
+
+        FlockingComponent flock = templateFlock;
+        flock.enabled = true;
+        world.addComponent(e, flock);
+
+        VelocityComponent vel{};
+        vel.linearVelocity = RuntimeFlockingVelocity(nextIndex, std::max(1.0f, templateFlock.maxSpeed * 0.5f));
+        vel.angularVelocity = glm::vec3(0.0f);
+        world.addComponent(e, vel);
+
+        ShapeComponent shape{};
+        shape.shape = SphereShape{ std::max(0.01f, templateFlock.boidRadius) };
+        shape.collisionType = CollisionType::SOLID;
+        world.addComponent(e, shape);
+
+        RenderMeshComponent mesh{};
+        mesh.meshName = "sphere.obj";
+        mesh.textureName = "white.png";
+        world.addComponent(e, mesh);
+
+        MaterialComponent mat{};
+        mat.shadingModel = ShadingModel::Phong;
+        mat.diffuseColor = glm::vec3(0.95f, 0.85f, 0.25f);
+        mat.specularColor = glm::vec3(0.05f);
+        mat.shininess = 8.0f;
+        mat.alpha = 1.0f;
+        world.addComponent(e, mat);
+
+        ++nextIndex;
+    }
+
+    m_appliedFlockingBoidCount = targetCount;
 }
 
 bool Scenario_FlatbufferScene::PopPendingSpawn(Net::SpawnObjectPayload& outPayload)
@@ -1091,6 +1287,13 @@ void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSc
 
     if (!scene)
         return;
+
+    if (m_hasFlockingAgents)
+    {
+        const int requested = m_requestedFlockingBoidCount.load(std::memory_order_acquire);
+        if (requested >= 0 && requested != m_appliedFlockingBoidCount)
+            ApplyRuntimeFlockingBoidCount(world, requested);
+    }
 
     // --------------------------------------------------
     // Animated object update

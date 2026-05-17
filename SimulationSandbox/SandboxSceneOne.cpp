@@ -26,7 +26,6 @@
 
 #include "Scenario_PrimitiveScene.h"
 #include "Scenario_FlatbufferScene.h"
-#include "Scenario_FlockingDemo.h"
 #include "PhysicsSystem.h"
 #include "CollisionSystem.h"
 #include "FlockingSystem.h"
@@ -358,8 +357,6 @@ struct SimSharedState
     std::atomic<int> requestedSceneIndex{ -1 };
     std::atomic<bool> requestedSceneReload{ false };
     std::atomic<uint32_t> sceneCameraResetGeneration{ 0 };
-    std::atomic<bool> worldRebuildInProgress{ false };
-
     // Gravity enable flag: controlled globally (and applied by sim thread)
     std::atomic<bool> gravityOn{ true };
 
@@ -406,6 +403,8 @@ struct SimSharedState
     std::atomic<float> measuredSimLoopHz{ 0.0f };
     std::mutex netStatsMutex;
     Net::NetworkStats netStats{};
+    std::mutex activePeerIdsMutex;
+    std::vector<int> activePeerIds;
     std::mutex simTimingMutex;
     SimTimingStats simTiming{};
     std::atomic<uint32_t> fixedStepsLast{ 0 };
@@ -429,8 +428,6 @@ struct SimSharedState
     std::atomic<float> flockingAvoidanceWeight{ 2.5f };
     std::atomic<int> flockingDebugAgentCount{ 0 };
     std::atomic<int> flockingSearchMode{ static_cast<int>(FlockingNeighbourSearchMode::BruteForce) };
-    std::atomic<int> flockingDemoBoidCount{ 100 };
-    std::atomic<bool> flockingDemoRebuildRequested{ false };
     std::mutex debugCountsMutex;
     RuntimeDebugCounts debugCounts{};
     // Core indices actually assigned (for UI display)
@@ -824,6 +821,34 @@ static const char* FlockingSearchModeName(FlockingNeighbourSearchMode mode)
     }
 }
 
+static void RefreshFlatbufferScenarioPeerFallbacks(
+    ScenarioManager& scenarios,
+    SimSharedState& shared,
+    int localPeerId)
+{
+    std::vector<int> activePeerIds{ localPeerId };
+    {
+        std::lock_guard<std::mutex> lk(shared.activePeerIdsMutex);
+        for (int peerId : shared.activePeerIds)
+        {
+            if (peerId >= 1 && peerId <= 4 &&
+                std::find(activePeerIds.begin(), activePeerIds.end(), peerId) == activePeerIds.end())
+            {
+                activePeerIds.push_back(peerId);
+            }
+        }
+    }
+
+    for (int i = 0; i < scenarios.Count(); ++i)
+    {
+        if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(scenarios.Get(i)))
+        {
+            fb->SetLocalPeerId(localPeerId);
+            fb->SetConfiguredPeerIds(activePeerIds);
+        }
+    }
+}
+
 // ============================================================================
 // Snapshot builder — called by the sim thread after each tick
 // ============================================================================
@@ -1145,6 +1170,7 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     const ULONGLONG t = GetTickCount64();
                     std::cout << "[T] SIM applying scene idx=" << desired
                         << " t=" << t << "ms\n";
+                    RefreshFlatbufferScenarioPeerFallbacks(scenarios, shared, localPeerId);
                     scenarios.SwitchTo(world, desired);
                     physicsSystem.InitializePhysicsBodies(world);
                     shared.sceneCameraResetGeneration.store(
@@ -1420,25 +1446,8 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
                         pendingSpawnsBeforeUpdate = fb->PendingSpawnCount();
 
-                    bool flockingDemoRebuild = false;
-                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
-                    {
-                        flockingDemoRebuild =
-                            shared.flockingDemoRebuildRequested.exchange(false, std::memory_order_acq_rel);
-                        if (flockingDemoRebuild)
-                        {
-                            shared.worldRebuildInProgress.store(true, std::memory_order_release);
-                            flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
-                        }
-                    }
-
                     const double scenarioStartSec = NowSeconds();
                     s->Update(world, fdt, currentSceneGeneration);
-                    if (flockingDemoRebuild)
-                    {
-                        shared.sceneCameraResetGeneration.fetch_add(1, std::memory_order_acq_rel);
-                        shared.worldRebuildInProgress.store(false, std::memory_order_release);
-                    }
                     const double flockingStartSec = NowSeconds();
 
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
@@ -1492,25 +1501,8 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
                         pendingSpawnsBeforeUpdate = fb->PendingSpawnCount();
 
-                    bool flockingDemoRebuild = false;
-                    if (auto* flockDemo = dynamic_cast<Scenario_FlockingDemo*>(s))
-                    {
-                        flockingDemoRebuild =
-                            shared.flockingDemoRebuildRequested.exchange(false, std::memory_order_acq_rel);
-                        if (flockingDemoRebuild)
-                        {
-                            shared.worldRebuildInProgress.store(true, std::memory_order_release);
-                            flockDemo->RequestBoidCount(shared.flockingDemoBoidCount.load(std::memory_order_relaxed));
-                        }
-                    }
-
                     const double scenarioStartSec = NowSeconds();
                     s->Update(world, stepDt, currentSceneGeneration);
-                    if (flockingDemoRebuild)
-                    {
-                        shared.sceneCameraResetGeneration.fetch_add(1, std::memory_order_acq_rel);
-                        shared.worldRebuildInProgress.store(false, std::memory_order_release);
-                    }
                     const double flockingStartSec = NowSeconds();
 
                     if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(s))
@@ -1775,6 +1767,10 @@ static void NetworkReceiveThreadFunc(
                 spawns.push_back(payload);
 
             stats = runtime.net.GetStats();
+            {
+                std::lock_guard<std::mutex> lk(shared.activePeerIdsMutex);
+                shared.activePeerIds = runtime.net.GetActivePeerIds();
+            }
         }
 
         {
@@ -1997,6 +1993,10 @@ static void NetworkSendThreadFunc(
             std::lock_guard<std::mutex> netLock(runtime.mutex);
             runtime.net.UpdateSend(dt);
             stats = runtime.net.GetStats();
+            {
+                std::lock_guard<std::mutex> lk(shared.activePeerIdsMutex);
+                shared.activePeerIds = runtime.net.GetActivePeerIds();
+            }
         }
 
         {
@@ -2118,7 +2118,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     ScenarioManager  scenarios;
 
     scenarios.Add(std::make_unique<Scenario_PrimitiveScene>());
-    scenarios.Add(std::make_unique<Scenario_FlockingDemo>());
+    scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/flatbufferFlockingDemo.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/newtonsCradle.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/bouncingBalls.bin"));
     scenarios.Add(std::make_unique<Scenario_FlatbufferScene>("assets/scenes/piston.bin"));
@@ -2133,7 +2133,10 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
     for (int i = 0; i < scenarios.Count(); ++i)
     {
         if (auto* fb = dynamic_cast<Scenario_FlatbufferScene*>(scenarios.Get(i)))
+        {
             fb->SetLocalPeerId(localPeerId);
+            fb->SetConfiguredPeerIds(std::vector<int>{ localPeerId });
+        }
     }
 
     if (scenarios.Count() > 0)
@@ -2342,14 +2345,11 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 
         if (activeSceneCamera == INVALID_ENTITY)
         {
-            if (!shared.worldRebuildInProgress.load(std::memory_order_acquire))
+            sceneCameraOptions = CollectSceneCameras(world);
+            if (!sceneCameraOptions.empty())
             {
-                sceneCameraOptions = CollectSceneCameras(world);
-                if (!sceneCameraOptions.empty())
-                {
-                    activeSceneCamera = sceneCameraOptions.front().entity;
-                    ApplySceneCamera(world, activeSceneCamera, renderCamera);
-                }
+                activeSceneCamera = sceneCameraOptions.front().entity;
+                ApplySceneCamera(world, activeSceneCamera, renderCamera);
             }
         }
 
@@ -2617,10 +2617,6 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                     if (ImGui::Checkbox("Apply UI Settings To Boids", &useUiSettings))
                         shared.flockingUseUiSettings.store(useUiSettings, std::memory_order_relaxed);
 
-                    int demoBoidCount = shared.flockingDemoBoidCount.load(std::memory_order_relaxed);
-                    if (ImGui::SliderInt("Demo Boid Count", &demoBoidCount, 10, 2000))
-                        shared.flockingDemoBoidCount.store(demoBoidCount, std::memory_order_relaxed);
-
                     int searchMode = shared.flockingSearchMode.load(std::memory_order_relaxed);
                     const char* searchModeLabels[] = { "Brute Force", "Uniform Grid", "Octree" };
                     if (ImGui::Combo("Neighbour Search", &searchMode, searchModeLabels, 3))
@@ -2875,8 +2871,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
         }
 
         {
-            if (!shared.worldRebuildInProgress.load(std::memory_order_acquire))
-                sceneCameraOptions = CollectSceneCameras(world);
+            sceneCameraOptions = CollectSceneCameras(world);
 
             Net::NetworkStats netStats{};
             {
@@ -3341,12 +3336,25 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
                 if (ImGui::Checkbox("Apply UI Settings To Boids", &useUiSettings))
                     shared.flockingUseUiSettings.store(useUiSettings, std::memory_order_relaxed);
 
-                int demoBoidCount = shared.flockingDemoBoidCount.load(std::memory_order_relaxed);
-                if (ImGui::SliderInt("Performance Demo Boid Count", &demoBoidCount, 10, 2000))
-                    shared.flockingDemoBoidCount.store(demoBoidCount, std::memory_order_relaxed);
-                ImGui::SameLine();
-                if (ImGui::Button("Apply Boid Count"))
-                    shared.flockingDemoRebuildRequested.store(true, std::memory_order_release);
+                if (auto* fbScene = dynamic_cast<Scenario_FlatbufferScene*>(scenarios.Current()))
+                {
+                    if (fbScene->HasFlockingAgents() || flockStats.agentCount > 0)
+                    {
+                        static int flatbufferBoidTarget = 100;
+                        static int lastObservedFlockingCount = 0;
+                        if (flockStats.agentCount > 0 && flockStats.agentCount != lastObservedFlockingCount)
+                        {
+                            flatbufferBoidTarget = flockStats.agentCount;
+                            lastObservedFlockingCount = flockStats.agentCount;
+                        }
+
+                        ImGui::SeparatorText("FlatBuffer Flocking Scene");
+                        ImGui::SliderInt("Target Boid Count", &flatbufferBoidTarget, 10, 2000);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Apply Count"))
+                            fbScene->RequestFlockingBoidCount(flatbufferBoidTarget);
+                    }
+                }
 
                 int searchMode = shared.flockingSearchMode.load(std::memory_order_relaxed);
                 const char* searchModeLabels[] = {

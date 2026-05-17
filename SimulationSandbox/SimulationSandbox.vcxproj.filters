@@ -132,9 +132,6 @@
     <ClInclude Include="Scenario_PrimitiveScene.h">
       <Filter>Header Files\EC Parts.h</Filter>
     </ClInclude>
-    <ClInclude Include="Scenario_FlockingDemo.h">
-      <Filter>Header Files\EC Parts.h</Filter>
-    </ClInclude>
     <ClInclude Include="ScenarioManager.h">
       <Filter>Header Files\EC Parts.h</Filter>
     </ClInclude>
@@ -174,9 +171,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Scenario_PrimitiveScene.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Scenario_FlockingDemo.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="imgui\imgui.cpp">

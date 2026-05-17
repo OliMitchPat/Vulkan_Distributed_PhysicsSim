@@ -30,6 +30,7 @@ namespace Net
         int snapshotAddrLen = 0;
 
         uint32_t nextSeq = 1;
+        bool active = false;
         std::unordered_set<uint32_t> receivedReliableSeqs;
         std::deque<uint32_t> receivedReliableSeqOrder;
         std::vector<PendingMessage> resendQueue;

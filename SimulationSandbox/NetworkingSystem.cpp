@@ -455,6 +455,7 @@ namespace Net
                 peer->snapshotAddrLen = Net::SockaddrLen(from);
             }
         }
+        peer->active = true;
 
         const MsgType msgType = (MsgType)hdr->msgType;
         if (channel == PacketChannel::Control && msgType == MsgType::STATE_SNAPSHOT)
@@ -790,6 +791,17 @@ namespace Net
             static_cast<uint32_t>(m_delayedIncomingSnapshots.size());
 
         return stats;
+    }
+
+    std::vector<int> NetworkingSystem::GetActivePeerIds() const
+    {
+        std::vector<int> ids;
+        for (const auto& peer : m_peers)
+        {
+            if (peer.active)
+                ids.push_back(peer.peerId);
+        }
+        return ids;
     }
 
     // ============================================================

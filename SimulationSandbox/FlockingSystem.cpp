@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 #include <unordered_set>
 #include <variant>
@@ -650,24 +651,60 @@ glm::vec3 FlockingSystem::CalculateAvoidance(
 
         if (obstacle.type == FlockingObstacleType::Sphere)
         {
-            const glm::vec3 away = lookAheadPosition - obstacle.position;
+            const glm::vec3 closestOnPath = ClosestPointOnSegment(boid.position, lookAheadPosition, obstacle.position);
+            const glm::vec3 away = closestOnPath - obstacle.position;
             const float distance = glm::length(away);
             const float triggerDistance = obstacle.radius + boid.boidRadius + m_obstacleMargin;
             if (distance < triggerDistance)
             {
                 const float t = 1.0f - distance / std::max(kEpsilon, triggerDistance);
-                avoidance += SafeNormalize(away, -forward) * (m_boundsAvoidanceStrength * t);
+                avoidance += SafeNormalize(away, SafeNormalize(boid.position - obstacle.position, -forward)) *
+                    (m_boundsAvoidanceStrength * t);
             }
         }
         else if (obstacle.type == FlockingObstacleType::Aabb)
         {
-            const glm::vec3 closest = glm::clamp(lookAheadPosition, obstacle.min, obstacle.max);
-            const glm::vec3 away = lookAheadPosition - closest;
+            const glm::vec3 expandedMin = obstacle.min - glm::vec3(boid.boidRadius + m_obstacleMargin);
+            const glm::vec3 expandedMax = obstacle.max + glm::vec3(boid.boidRadius + m_obstacleMargin);
+            const glm::vec3 samplePoints[] = {
+                boid.position,
+                boid.position + forward * (m_lookAheadDistance * 0.33f),
+                boid.position + forward * (m_lookAheadDistance * 0.66f),
+                lookAheadPosition
+            };
+
+            glm::vec3 bestAway{ 0.0f };
+            float bestDistance = std::numeric_limits<float>::max();
+            for (const glm::vec3& sample : samplePoints)
+            {
+                const glm::vec3 closest = glm::clamp(sample, obstacle.min, obstacle.max);
+                const glm::vec3 away = sample - closest;
+                const float distance = glm::length(away);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestAway = away;
+                }
+
+                if (sample.x >= expandedMin.x && sample.x <= expandedMax.x &&
+                    sample.y >= expandedMin.y && sample.y <= expandedMax.y &&
+                    sample.z >= expandedMin.z && sample.z <= expandedMax.z)
+                {
+                    bestDistance = 0.0f;
+                    bestAway = sample - glm::clamp(sample, obstacle.min, obstacle.max);
+                    break;
+                }
+            }
+
+            const glm::vec3 boxCenter = 0.5f * (obstacle.min + obstacle.max);
+            const glm::vec3 away = glm::dot(bestAway, bestAway) > kEpsilon
+                ? bestAway
+                : boid.position - boxCenter;
             const float distance = glm::length(away);
             const float triggerDistance = boid.boidRadius + m_obstacleMargin;
-            if (distance < triggerDistance)
+            if (bestDistance < triggerDistance)
             {
-                const float t = 1.0f - distance / std::max(kEpsilon, triggerDistance);
+                const float t = 1.0f - bestDistance / std::max(kEpsilon, triggerDistance);
                 avoidance += SafeNormalize(away, -forward) * (m_boundsAvoidanceStrength * t);
             }
         }
@@ -711,6 +748,17 @@ glm::vec3 FlockingSystem::SafeNormalize(const glm::vec3& v, const glm::vec3& fal
         return fallback;
 
     return v / std::sqrt(lenSq);
+}
+
+glm::vec3 FlockingSystem::ClosestPointOnSegment(const glm::vec3& a, const glm::vec3& b, const glm::vec3& point)
+{
+    const glm::vec3 ab = b - a;
+    const float lenSq = glm::dot(ab, ab);
+    if (lenSq < kEpsilon)
+        return a;
+
+    const float t = glm::clamp(glm::dot(point - a, ab) / lenSq, 0.0f, 1.0f);
+    return a + ab * t;
 }
 
 void FlockingSystem::WeightedTruncatedAdd(glm::vec3& total, float& remaining, const glm::vec3& force)

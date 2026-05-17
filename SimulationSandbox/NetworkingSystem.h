@@ -44,6 +44,7 @@ namespace Net
         bool Init(const PeerConfig& cfg);
         void Shutdown();
         NetworkStats GetStats() const;
+        std::vector<int> GetActivePeerIds() const;
         void Update(float dt);
         void UpdateReceive(float dt);
         void UpdateSend(float dt);

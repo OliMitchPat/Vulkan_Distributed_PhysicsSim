@@ -121,6 +121,35 @@ table SimulatedObject {
 }
 
 // =======================
+// Advanced Feature: Flocking and Steering
+// =======================
+
+enum FlockingSearchMode : byte {
+  BRUTE_FORCE,
+  UNIFORM_GRID,
+  OCTREE
+}
+
+table FlockingSettings {
+  enabled: bool = true;
+  debug_enabled: bool = false;
+  flock_id: int = 0;
+
+  max_speed: float = 8.0;
+  max_force: float = 15.0;
+  perception_radius: float = 6.0;
+  separation_radius: float = 1.5;
+
+  cohesion_weight: float = 0.8;
+  alignment_weight: float = 1.0;
+  separation_weight: float = 1.5;
+  avoidance_weight: float = 2.5;
+
+  boid_radius: float = 0.2;
+  search_mode: FlockingSearchMode = BRUTE_FORCE;
+}
+
+// =======================
 // Object Definition
 // =======================
 
@@ -136,6 +165,7 @@ table Object {
   shape: Shape;
   behaviour: Behaviour;
   collision_type: CollisionType = SOLID; 
+  flocking: FlockingSettings;
 }
 
 // =======================

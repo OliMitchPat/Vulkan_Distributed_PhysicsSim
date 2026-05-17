@@ -16,6 +16,7 @@ namespace Net
     {
         uint32_t controlPacketsReceived = 0;
         uint32_t snapshotPacketsSent = 0;
+        uint32_t snapshotPacketsSendFailed = 0;
         uint32_t snapshotPacketsReceived = 0;
         uint32_t snapshotPacketsDropped = 0;
         uint32_t snapshotPacketsDelayed = 0;

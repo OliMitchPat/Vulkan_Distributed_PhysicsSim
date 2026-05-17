@@ -3219,6 +3219,7 @@ int RunSandbox(GLFWwindow* window, Renderer& renderer, const Net::PeerConfig& cf
 #define NET_ROW(label, value) ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(label); ImGui::TableSetColumnIndex(1); ImGui::Text("%u", (unsigned)(value))
                     NET_ROW("Control packets received", netStats.controlPacketsReceived);
                     NET_ROW("Snapshot packets sent", netStats.snapshotPacketsSent);
+                    NET_ROW("Snapshot send failures", netStats.snapshotPacketsSendFailed);
                     NET_ROW("Snapshot packets received", netStats.snapshotPacketsReceived);
                     NET_ROW("Snapshot packets dropped", netStats.snapshotPacketsDropped);
                     NET_ROW("Snapshot packets delayed", netStats.snapshotPacketsDelayed);

@@ -521,11 +521,18 @@ namespace Net
 
             if (p.delaySec <= 0.0f)
             {
-                m_snapshotSocket.Send(
+                if (m_snapshotSocket.Send(
                     p.addr,
                     p.addrLen,
                     p.payload.data(),
-                    (int)p.payload.size());
+                    (int)p.payload.size()))
+                {
+                    ++m_stats.snapshotPacketsSent;
+                }
+                else
+                {
+                    ++m_stats.snapshotPacketsSendFailed;
+                }
 
                 m_delayedOutgoingSnapshots.erase(
                     m_delayedOutgoingSnapshots.begin() + (int)i);
@@ -1220,10 +1227,15 @@ namespace Net
                 }
                 else
                 {
-                    m_snapshotSocket.Send(peer.snapshotAddr, peer.snapshotAddrLen, buffer, bytes);
+                    if (m_snapshotSocket.Send(peer.snapshotAddr, peer.snapshotAddrLen, buffer, bytes))
+                    {
+                        ++m_stats.snapshotPacketsSent;
+                    }
+                    else
+                    {
+                        ++m_stats.snapshotPacketsSendFailed;
+                    }
                 }
-
-                ++m_stats.snapshotPacketsSent;
             }
         }
 

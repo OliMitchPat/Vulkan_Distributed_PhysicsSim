@@ -8,6 +8,7 @@
 #include <vector>
 
 class World;
+class GpuFlockingCompute;
 struct FlockingComponent;
 
 class FlockingSystem
@@ -34,6 +35,8 @@ public:
 
     void SetNeighbourSearchMode(FlockingNeighbourSearchMode mode) { m_searchMode = mode; }
     FlockingNeighbourSearchMode GetNeighbourSearchMode() const { return m_searchMode; }
+
+    void SetGpuCompute(GpuFlockingCompute* compute) { m_gpuCompute = compute; }
 
 private:
     struct BoidRef
@@ -95,6 +98,7 @@ private:
     void QueryNeighboursOctree(World& world, const BoidRef& boid, const FlockingComponent& flock, std::vector<const BoidRef*>& perceptionNeighbours, std::vector<const BoidRef*>& separationNeighbours);
     void QueryOctreeNode(int nodeIndex, const glm::vec3& center, float radiusSq, std::vector<size_t>& candidates) const;
     void TestNeighbourCandidate(World& world, const BoidRef& boid, const FlockingComponent& flock, size_t candidateIndex, std::vector<const BoidRef*>& perceptionNeighbours, std::vector<const BoidRef*>& separationNeighbours);
+    bool UpdateGpuCompute(World& world, float dt);
 
     glm::vec3 CalculateCohesion(const BoidRef& boid, const std::vector<const BoidRef*>& neighbours, float maxSpeed, float maxForce) const;
     glm::vec3 CalculateAlignment(const BoidRef& boid, const std::vector<const BoidRef*>& neighbours, float maxSpeed, float maxForce) const;
@@ -113,6 +117,7 @@ private:
     bool m_debugEnabled = false;
     bool m_boundsEnabled = true;
     FlockingNeighbourSearchMode m_searchMode = FlockingNeighbourSearchMode::BruteForce;
+    GpuFlockingCompute* m_gpuCompute = nullptr;
     int m_localPeerId = 0;
 
     glm::vec3 m_boundsMin{ -20.0f, 0.0f, -20.0f };

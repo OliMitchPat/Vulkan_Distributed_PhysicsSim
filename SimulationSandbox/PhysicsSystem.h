@@ -42,7 +42,10 @@ public:
 
         phys->body.SetPosition(tr->position);
 
-        glm::quat q = glm::quat(tr->rotation);
+        glm::quat q = tr->orientation;
+        if (glm::dot(q, q) <= 1e-8f)
+            q = glm::quat(tr->rotation);
+        q = glm::normalize(q);
         phys->body.SetOrientation(q);
 
         bool isContainer = false;

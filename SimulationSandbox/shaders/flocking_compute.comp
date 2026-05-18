@@ -1,0 +1,184 @@
+#version 450
+
+struct Boid
+{
+    vec4 position;
+    vec4 velocity;
+};
+
+layout(std430, binding = 0) readonly buffer InputBoids
+{
+    Boid inputBoids[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBoids
+{
+    Boid outputBoids[];
+};
+
+layout(push_constant) uniform Params
+{
+    uint boidCount;
+    float dt;
+    float perceptionRadius;
+    float separationRadius;
+
+    float cohesionWeight;
+    float alignmentWeight;
+    float separationWeight;
+    float avoidanceWeight;
+
+    float maxSpeed;
+    float maxForce;
+    float boundsMargin;
+    float boundsAvoidanceStrength;
+
+    vec4 boundsMin;
+    vec4 boundsMax;
+} params;
+
+layout(local_size_x = 256) in;
+
+vec3 limitVec(vec3 v, float maxLen)
+{
+    float len = length(v);
+    if (len > maxLen && len > 0.0001)
+    {
+        return v / len * maxLen;
+    }
+
+    return v;
+}
+
+vec3 safeDesired(vec3 direction, float speed)
+{
+    float len = length(direction);
+    if (len <= 0.0001)
+    {
+        return vec3(0.0);
+    }
+
+    return direction / len * speed;
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+
+    if (i >= params.boidCount)
+    {
+        return;
+    }
+
+    vec3 pos = inputBoids[i].position.xyz;
+    vec3 vel = inputBoids[i].velocity.xyz;
+
+    vec3 cohesionSum = vec3(0.0);
+    vec3 alignmentSum = vec3(0.0);
+    vec3 separationSum = vec3(0.0);
+
+    uint cohesionCount = 0;
+    uint alignmentCount = 0;
+    uint separationCount = 0;
+
+    float perceptionSq = params.perceptionRadius * params.perceptionRadius;
+    float separationSq = params.separationRadius * params.separationRadius;
+
+    for (uint j = 0; j < params.boidCount; ++j)
+    {
+        if (i == j)
+        {
+            continue;
+        }
+
+        vec3 otherPos = inputBoids[j].position.xyz;
+        vec3 otherVel = inputBoids[j].velocity.xyz;
+
+        vec3 offset = otherPos - pos;
+        float distSq = dot(offset, offset);
+
+        if (distSq < perceptionSq)
+        {
+            cohesionSum += otherPos;
+            alignmentSum += otherVel;
+            cohesionCount++;
+            alignmentCount++;
+        }
+
+        if (distSq < separationSq && distSq > 0.0001)
+        {
+            float dist = sqrt(distSq);
+            separationSum += normalize(pos - otherPos) / dist;
+            separationCount++;
+        }
+    }
+
+    vec3 force = vec3(0.0);
+
+    if (cohesionCount > 0)
+    {
+        vec3 centre = cohesionSum / float(cohesionCount);
+        vec3 desired = safeDesired(centre - pos, params.maxSpeed);
+        force += limitVec(desired - vel, params.maxForce) * params.cohesionWeight;
+    }
+
+    if (alignmentCount > 0)
+    {
+        vec3 averageVelocity = alignmentSum / float(alignmentCount);
+        vec3 desired = safeDesired(averageVelocity, params.maxSpeed);
+        force += limitVec(desired - vel, params.maxForce) * params.alignmentWeight;
+    }
+
+    if (separationCount > 0)
+    {
+        vec3 averageSeparation = separationSum / float(separationCount);
+        vec3 desired = safeDesired(averageSeparation, params.maxSpeed);
+        force += limitVec(desired - vel, params.maxForce) * params.separationWeight;
+    }
+
+    vec3 avoidance = vec3(0.0);
+    vec3 minBounds = params.boundsMin.xyz;
+    vec3 maxBounds = params.boundsMax.xyz;
+    float margin = max(params.boundsMargin, 0.0001);
+
+    if (pos.x < minBounds.x + margin)
+    {
+        avoidance.x += (minBounds.x + margin - pos.x) / margin;
+    }
+    if (pos.x > maxBounds.x - margin)
+    {
+        avoidance.x -= (pos.x - (maxBounds.x - margin)) / margin;
+    }
+    if (pos.y < minBounds.y + margin)
+    {
+        avoidance.y += (minBounds.y + margin - pos.y) / margin;
+    }
+    if (pos.y > maxBounds.y - margin)
+    {
+        avoidance.y -= (pos.y - (maxBounds.y - margin)) / margin;
+    }
+    if (pos.z < minBounds.z + margin)
+    {
+        avoidance.z += (minBounds.z + margin - pos.z) / margin;
+    }
+    if (pos.z > maxBounds.z - margin)
+    {
+        avoidance.z -= (pos.z - (maxBounds.z - margin)) / margin;
+    }
+
+    if (length(avoidance) > 0.0001)
+    {
+        vec3 desired = safeDesired(avoidance, params.maxSpeed);
+        force += limitVec(desired - vel, params.maxForce) * params.avoidanceWeight;
+    }
+
+    force = limitVec(force, params.maxForce);
+
+    vel += force * params.dt;
+    vel = limitVec(vel, params.maxSpeed);
+
+    pos += vel * params.dt;
+
+    outputBoids[i].position = vec4(pos, 1.0);
+    outputBoids[i].velocity = vec4(vel, 0.0);
+}

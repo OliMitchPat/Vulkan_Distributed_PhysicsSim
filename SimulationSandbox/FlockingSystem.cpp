@@ -1,6 +1,7 @@
 #include "FlockingSystem.h"
 
 #include "Components.h"
+#include "GpuFlockingCompute.h"
 #include "World.h"
 
 #include <glm/gtc/quaternion.hpp>
@@ -72,6 +73,19 @@ void FlockingSystem::Update(World& world, float dt)
     m_stats.agentCount = static_cast<int>(m_allBoids.size());
     m_stats.ownedAgentCount = static_cast<int>(m_updateBoidIndices.size());
     m_stats.searchMode = m_searchMode;
+
+    if (m_searchMode == FlockingNeighbourSearchMode::GpuComputeBruteForce)
+    {
+        m_stats.gpuComputeAvailable = m_gpuCompute != nullptr && m_gpuCompute->IsAvailable();
+        if (UpdateGpuCompute(world, dt))
+        {
+            const auto end = std::chrono::steady_clock::now();
+            m_stats.updateMs = std::chrono::duration<float, std::milli>(end - start).count();
+            return;
+        }
+
+        m_stats.gpuFallbackActive = true;
+    }
 
     const auto spatialStart = std::chrono::steady_clock::now();
     BuildSpatialIndex();
@@ -150,6 +164,102 @@ void FlockingSystem::Update(World& world, float dt)
 
     const auto end = std::chrono::steady_clock::now();
     m_stats.updateMs = std::chrono::duration<float, std::milli>(end - start).count();
+}
+
+bool FlockingSystem::UpdateGpuCompute(World& world, float dt)
+{
+    if (!m_gpuCompute || !m_gpuCompute->IsAvailable() || m_allBoids.empty() || m_updateBoidIndices.empty())
+        return false;
+
+    FlockingComponent* settings = nullptr;
+    for (const size_t boidIndex : m_updateBoidIndices)
+    {
+        settings = world.getComponent<FlockingComponent>(m_allBoids[boidIndex].entity);
+        if (settings)
+            break;
+    }
+
+    if (!settings)
+        return false;
+
+    std::vector<GpuBoid> gpuBoids;
+    gpuBoids.reserve(m_allBoids.size());
+    for (const BoidRef& boid : m_allBoids)
+    {
+        GpuBoid gpu{};
+        gpu.position = glm::vec4(boid.position, 1.0f);
+        gpu.velocity = glm::vec4(boid.velocity, 0.0f);
+        gpuBoids.push_back(gpu);
+    }
+
+    GpuFlockingParams params{};
+    params.boidCount = static_cast<uint32_t>(gpuBoids.size());
+    params.dt = dt;
+    params.perceptionRadius = settings->perceptionRadius;
+    params.separationRadius = settings->separationRadius;
+    params.cohesionWeight = settings->cohesionWeight;
+    params.alignmentWeight = settings->alignmentWeight;
+    params.separationWeight = settings->separationWeight;
+    params.avoidanceWeight = m_boundsEnabled ? settings->avoidanceWeight : 0.0f;
+    params.maxSpeed = settings->maxSpeed;
+    params.maxForce = settings->maxForce;
+    params.boundsMargin = m_boundsMargin;
+    params.boundsAvoidanceStrength = m_boundsAvoidanceStrength;
+    params.boundsMin = glm::vec4(m_boundsMin, 0.0f);
+    params.boundsMax = glm::vec4(m_boundsMax, 0.0f);
+
+    try
+    {
+        m_gpuCompute->UpdateBoids(gpuBoids, params);
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    for (const size_t boidIndex : m_updateBoidIndices)
+    {
+        if (boidIndex >= gpuBoids.size())
+            continue;
+
+        BoidRef& boid = m_allBoids[boidIndex];
+        auto* transform = world.getComponent<TransformComponent>(boid.entity);
+        auto* velocity = world.getComponent<VelocityComponent>(boid.entity);
+        auto* flock = world.getComponent<FlockingComponent>(boid.entity);
+        if (!transform || !velocity || !flock || !flock->enabled)
+            continue;
+
+        glm::vec3 newPosition = glm::vec3(gpuBoids[boidIndex].position);
+        glm::vec3 newVelocity = glm::vec3(gpuBoids[boidIndex].velocity);
+
+        if (m_boundsEnabled)
+            newPosition = glm::clamp(newPosition, m_boundsMin, m_boundsMax);
+
+        transform->position = newPosition;
+        velocity->linearVelocity = newVelocity;
+        if (glm::dot(newVelocity, newVelocity) > kEpsilon)
+        {
+            const float yaw = std::atan2(newVelocity.x, newVelocity.z);
+            transform->rotation.y = yaw;
+            transform->orientation = glm::angleAxis(yaw, glm::vec3(0, 1, 0));
+        }
+
+        boid.position = newPosition;
+        boid.velocity = newVelocity;
+    }
+
+    const GpuFlockingTiming& timing = m_gpuCompute->Timing();
+    m_stats.neighbourChecks = static_cast<int>(m_updateBoidIndices.size() * (m_allBoids.size() - 1));
+    m_stats.spatialCandidateChecks = m_stats.neighbourChecks;
+    m_stats.memoryEstimateBytes = m_allBoids.size() * sizeof(GpuBoid) * 4;
+    m_stats.gpuComputeAvailable = true;
+    m_stats.gpuFallbackActive = false;
+    m_stats.gpuUploadMs = timing.uploadMs;
+    m_stats.gpuDispatchMs = timing.dispatchMs;
+    m_stats.gpuReadbackMs = timing.readbackMs;
+    m_stats.gpuTotalMs = timing.totalMs;
+
+    return true;
 }
 
 void FlockingSystem::BuildBoidLists(World& world)

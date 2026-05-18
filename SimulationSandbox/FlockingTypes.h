@@ -15,7 +15,8 @@ enum class FlockingNeighbourSearchMode
 {
     BruteForce = 0,
     UniformGrid = 1,
-    Octree = 2
+    Octree = 2,
+    GpuComputeBruteForce = 3
 };
 
 struct FlockingStats
@@ -29,9 +30,15 @@ struct FlockingStats
     int spatialCandidateChecks = 0;
     size_t memoryEstimateBytes = 0;
     FlockingNeighbourSearchMode searchMode = FlockingNeighbourSearchMode::BruteForce;
+    bool gpuComputeAvailable = false;
+    bool gpuFallbackActive = false;
     float updateMs = 0.0f;
     float spatialBuildMs = 0.0f;
     float neighbourSearchMs = 0.0f;
+    float gpuUploadMs = 0.0f;
+    float gpuDispatchMs = 0.0f;
+    float gpuReadbackMs = 0.0f;
+    float gpuTotalMs = 0.0f;
     float cohesionMs = 0.0f;
     float alignmentMs = 0.0f;
     float separationMs = 0.0f;

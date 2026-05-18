@@ -45,6 +45,9 @@
     <ClInclude Include="FlockingTypes.h">
       <Filter>Header Files\Systems.h</Filter>
     </ClInclude>
+    <ClInclude Include="GpuFlockingCompute.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
     <ClInclude Include="imgui\imgui_impl_glfw.h">
       <Filter>Header Files\ImGui&amp;Extras.h</Filter>
     </ClInclude>
@@ -94,6 +97,18 @@
       <Filter>Header Files\Render.h</Filter>
     </ClInclude>
     <ClInclude Include="PhysicsSystem.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="ReplicaSmoothing.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="SandboxCameraUtils.h">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="SandboxNetworkThreads.inl">
+      <Filter>Header Files\Systems.h</Filter>
+    </ClInclude>
+    <ClInclude Include="SandboxSnapshot.h">
       <Filter>Header Files\Systems.h</Filter>
     </ClInclude>
     <ClInclude Include="Vertex.h">
@@ -164,10 +179,19 @@
     <ClCompile Include="PeerConfig.cpp">
       <Filter>Source Files\Systems</Filter>
     </ClCompile>
+    <ClCompile Include="ReplicaSmoothing.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="SandboxCameraUtils.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="SandboxSnapshot.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
     <ClCompile Include="ScenarioManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="SandboxSceneOne.cpp">
+    <ClCompile Include="SimulationRuntime.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Scenario_PrimitiveScene.cpp">
@@ -213,6 +237,9 @@
       <Filter>Source Files\Systems</Filter>
     </ClCompile>
     <ClCompile Include="FlockingSystem.cpp">
+      <Filter>Source Files\Systems</Filter>
+    </ClCompile>
+    <ClCompile Include="GpuFlockingCompute.cpp">
       <Filter>Source Files\Systems</Filter>
     </ClCompile>
     <ClCompile Include="Scenario_FlatbufferScene.cpp">

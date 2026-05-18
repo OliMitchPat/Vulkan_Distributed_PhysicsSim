@@ -18,6 +18,7 @@ public:
     // --- Entity management ---
 
     Entity createEntity();
+    Entity createEntityWithId(Entity e);
     void destroyEntity(Entity e);
     bool isAlive(Entity e) const;
 
@@ -109,6 +110,23 @@ inline Entity World::createEntity() {
 
     ensureEntityCapacity(e);
     alive[e] = true;
+    return e;
+}
+
+inline Entity World::createEntityWithId(Entity e) {
+    ensureEntityCapacity(e);
+
+    if (alive[e])
+        return e;
+
+    auto it = std::find(freeList.begin(), freeList.end(), e);
+    if (it != freeList.end())
+        freeList.erase(it);
+
+    alive[e] = true;
+    if (e >= nextEntity)
+        nextEntity = e + 1;
+
     return e;
 }
 

@@ -186,6 +186,12 @@ float Renderer::getAspectRatio() const
     return swapChainExtent.width / static_cast<float>(swapChainExtent.height);
 }
 
+uint32_t Renderer::GetGraphicsQueueFamily() const
+{
+    QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+    return indices.graphicsFamily.value_or(0);
+}
+
 void Renderer::BeginImGuiFrame()
 {
     if (!imguiInitialized) return;
@@ -1844,8 +1850,11 @@ void Renderer::endSingleTimeCommands(VkCommandBuffer commandBuffer) const {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue);
+    {
+        std::lock_guard<std::mutex> lk(queueMutex);
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(graphicsQueue);
+    }
 
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 }
@@ -2232,11 +2241,6 @@ void Renderer::drawFrame() {
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    if (vkQueueSubmit(
-        graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
-        throw std::runtime_error("failed to submit draw command buffer!");
-    }
-
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -2248,7 +2252,15 @@ void Renderer::drawFrame() {
     presentInfo.pImageIndices = &imageIndex;
     presentInfo.pResults = nullptr;
 
-    result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    {
+        std::lock_guard<std::mutex> lk(queueMutex);
+        if (vkQueueSubmit(
+            graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+            throw std::runtime_error("failed to submit draw command buffer!");
+        }
+
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+    }
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR ||
         result == VK_SUBOPTIMAL_KHR ||

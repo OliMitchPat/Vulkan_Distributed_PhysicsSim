@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <cstdint>
+#include <mutex>
 
 
 #include "RenderResources.h"
@@ -94,6 +95,12 @@ public:
 
     void BeginImGuiFrame(); 
     void EndImGuiFrame();  
+
+    VkDevice GetDevice() const { return device; }
+    VkPhysicalDevice GetPhysicalDevice() const { return physicalDevice; }
+    VkQueue GetGraphicsQueue() const { return graphicsQueue; }
+    uint32_t GetGraphicsQueueFamily() const;
+    std::mutex& GetQueueMutex() { return queueMutex; }
 private:
     const RenderScene* currentScene = nullptr;
 
@@ -119,6 +126,7 @@ private:
     VkDevice device = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
+    mutable std::mutex queueMutex;
 
     // --- Swapchain ---
     VkSwapchainKHR swapChain = VK_NULL_HANDLE;

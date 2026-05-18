@@ -1192,13 +1192,7 @@ bool Scenario_FlatbufferScene::SpawnFromNetworkEvent(
     }
     else
     {
-        e = world.createEntity();
-
-        if (static_cast<uint32_t>(e) != payload.objectId)
-        {
-            std::cout << "[Spawner] Deterministic id mismatch: expected=" << payload.objectId
-                << " got=" << static_cast<uint32_t>(e) << "\n";
-        }
+        e = world.createEntityWithId(e);
     }
 
     const std::string materialName = MaterialFromPayload(payload);
@@ -1301,45 +1295,51 @@ void Scenario_FlatbufferScene::Update(World& world, float dt, uint32_t currentSc
     // This should run before PhysicsSystem and CollisionSystem in the main loop.
     // The animated object is moved externally and assigned a velocity so
     // simulated objects collide with it as a moving kinematic object.
-    world.forEach<AnimatedPathComponent, PhysicsComponent>(
-        [&](Entity e, AnimatedPathComponent& path, PhysicsComponent& phys)
-        {
-            if (path.waypoints.size() < 2)
-                return;
-
-            const float safeDt = std::max(dt, 0.0001f);
-            const glm::vec3 oldPosition = phys.body.Position();
-
-            path.elapsed += std::max(0.0f, dt);
-
-            glm::vec3 newPosition{ 0.0f };
-            glm::quat newRotation{ 1.0f, 0.0f, 0.0f, 0.0f };
-            EvaluateAnimatedPath(path, newPosition, newRotation);
-
-            glm::vec3 linearVelocity = (newPosition - oldPosition) / safeDt;
-
-            if (path.mode == AnimatedPathMode::Stop && path.elapsed >= LastWaypointTime(path))
-                linearVelocity = glm::vec3(0.0f);
-
-            phys.body.SetMotionType(BodyMotionType::Kinematic);
-            phys.body.SetPosition(newPosition);
-            phys.body.SetOrientation(newRotation);
-            phys.body.SetLinearVelocity(linearVelocity);
-            phys.body.SetAngularVelocity(glm::vec3(0.0f));
-            phys.initialized = true;
-
-            if (auto* tr = world.getComponent<TransformComponent>(e))
+    const bool peerOneIsPresent = ContainsPeerId(m_configuredPeerIds, 1);
+    const bool thisPeerDrivesAnimatedObjects = (m_localPeerId == 1) || !peerOneIsPresent;
+    if (thisPeerDrivesAnimatedObjects)
+    {
+        world.forEach<AnimatedPathComponent, PhysicsComponent>(
+            [&](Entity e, AnimatedPathComponent& path, PhysicsComponent& phys)
             {
-                tr->position = newPosition;
-                tr->rotation = glm::eulerAngles(newRotation);
-            }
+                if (path.waypoints.size() < 2)
+                    return;
 
-            if (auto* vel = world.getComponent<VelocityComponent>(e))
-            {
-                vel->linearVelocity = linearVelocity;
-                vel->angularVelocity = glm::vec3(0.0f);
-            }
-        });
+                const float safeDt = std::max(dt, 0.0001f);
+                const glm::vec3 oldPosition = phys.body.Position();
+
+                path.elapsed += std::max(0.0f, dt);
+
+                glm::vec3 newPosition{ 0.0f };
+                glm::quat newRotation{ 1.0f, 0.0f, 0.0f, 0.0f };
+                EvaluateAnimatedPath(path, newPosition, newRotation);
+
+                glm::vec3 linearVelocity = (newPosition - oldPosition) / safeDt;
+
+                if (path.mode == AnimatedPathMode::Stop && path.elapsed >= LastWaypointTime(path))
+                    linearVelocity = glm::vec3(0.0f);
+
+                phys.body.SetMotionType(BodyMotionType::Kinematic);
+                phys.body.SetPosition(newPosition);
+                phys.body.SetOrientation(newRotation);
+                phys.body.SetLinearVelocity(linearVelocity);
+                phys.body.SetAngularVelocity(glm::vec3(0.0f));
+                phys.initialized = true;
+
+                if (auto* tr = world.getComponent<TransformComponent>(e))
+                {
+                    tr->position = newPosition;
+                    tr->rotation = glm::eulerAngles(newRotation);
+                    tr->orientation = newRotation;
+                }
+
+                if (auto* vel = world.getComponent<VelocityComponent>(e))
+                {
+                    vel->linearVelocity = linearVelocity;
+                    vel->angularVelocity = glm::vec3(0.0f);
+                }
+            });
+    }
 
     if (!scene->spawners() || !scene->spawners_type())
         return;

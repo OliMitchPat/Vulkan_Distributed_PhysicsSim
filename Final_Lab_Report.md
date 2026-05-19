@@ -1,7 +1,7 @@
 # Final Lab Report: Simulation & Concurrency
 
 **By:** Oliver Mitchell-Paterson  
-**Word Count:** 1589
+**Word Count:** 1705
 
 ## Contents
 
@@ -39,6 +39,8 @@ The world uses an ECS-style structure. Entities combine transform, velocity, phy
 
 This separation keeps application runtime code, physics code and distributed-state logic modular.
 
+![Project overview UML](Diagrams/Screenshot%202026-05-18%20155419.png)
+
 ### 1.2 Networking Architecture
 
 Networking uses UDP in a peer-to-peer model with separate send and receive threads. The send thread transmits local snapshots, spawns and global commands, while the receive thread decodes incoming packets and queues them for simulation-safe application.
@@ -49,6 +51,8 @@ Network impairment controls test the required 100ms +/- 50ms latency and 20% pac
 
 Incoming snapshots use sequence/tick checks so duplicate, stale or out-of-order updates are ignored. Remote object transforms are buffered and smoothed rather than applied directly, reducing visible jitter when packets arrive late.
 
+![UML diagram](Diagrams/Screenshot%202026-05-18%20160457.png)
+
 ### 1.3 Distributed Ownership and State Synchronisation
 
 Each simulated object has an `OwnerComponent` identifying the peer responsible for its physics update and collision response. Other peers render the received replica state instead of simulating the same object authoritatively.
@@ -57,6 +61,8 @@ This avoids conflicting physics updates and distributes work across peers. Spawn
 
 State synchronisation is snapshot based: owners publish compact object state and receivers interpolate or correct their local replicas.
 
+![UML diagram](Diagrams/Screenshot%202026-05-18%20160802.png)
+
 ### 1.4 Concurrency Architecture
 
 The runtime is split into render, simulation, network send and network receive threads. The simulation thread owns the live ECS `World`, while rendering reads a published `WorldSnapshot` so UI and graphics do not lock the simulation hot path.
@@ -64,6 +70,8 @@ The runtime is split into render, simulation, network send and network receive t
 Physics integration can use worker threads that process dynamic bodies in chunks before collision handling. Networking uses queues and shared buffers so packet processing does not block simulation.
 
 This architecture keeps the major systems asynchronous, matching the coursework requirement for independently controlled graphics, networking and simulation rates.
+
+![UML diagram](Diagrams/Screenshot%202026-05-18%20161731.png)
 
 ### 1.5 Thread Frequencies and Processor Affinity
 
@@ -81,17 +89,27 @@ This keeps the rigid-body solver CPU-based, where ownership, contacts, friction 
 
 Flocking also includes brute force, uniform grid and octree neighbour-search modes for extended simulation comparison.
 
+![UML diagram](Diagrams/Screenshot%202026-05-18%20162921.png)
+
+![UML diagram](Diagrams/Screenshot%202026-05-18%20162952.png)
+
 ### 1.7 Research for Flocking and Spatial Partitioning
 
 The advanced flocking behaviour was based on Reynolds' boids model, where flocking emerges from local collision avoidance, velocity matching and flock centring (Reynolds, 1987). These map to my separation/obstacle avoidance, alignment and cohesion behaviours. Using nearby neighbours rather than one global centre allows the flock to split around obstacles and reform naturally.
 
 The steering-force combination was based on Buckland's game AI steering methods. My system uses a weighted truncated sum, so avoidance and separation take priority before alignment and cohesion use the remaining steering budget (Buckland, 2005).
 
-The extended flocking work treats neighbour search as the bottleneck. Brute force checks every boid against every other boid, giving O(n squared) behaviour. The uniform grid mode follows spatial hashing ideas by inserting boids into cells and searching only nearby cells (Teschner et al., 2003).
+The extended flocking work treats neighbour search as the main performance bottleneck. A brute-force approach checks every boid against every other boid, giving O(n2) behaviour. The uniform-grid mode follows the same spatial hashing principle used by Teschner et al. (2003)
 
-The octree mode uses hierarchical spatial subdivision: 3D space is recursively split into eight regions so empty or distant regions can be skipped (Meagher, 1982; Ericson, 2005). The UI compares brute force, grid and octree by boid count, checks, update time and memory estimate.
+The octree mode uses hierarchical spatial subdivision: 3D space is recursively split into eight regions so empty or distant regions can be skipped (Ericson, 2005). The UI compares brute force, grid and octree by boid count, checks, update time and memory estimate.
 
-The flocking results meet the specification by comparing brute force against two spatial segmentation techniques: uniform grid and octree. Brute force performs all neighbour checks, so its cost increases rapidly as the boid count grows. The uniform grid and octree reduce the number of spatial candidates used for neighbour/collision avoidance checks by only searching nearby regions, improving the CPU update time at larger boid counts. The octree gives the lowest candidate count at 500 and 1000 boids, while the uniform grid has lower build overhead and slightly lower memory use. The GPU brute-force version was slower in these tests because boid data was passed between the CPU and GPU, so transfer and synchronisation overhead outweighed the benefit of parallel execution at these sample sizes.
+The Screenshots below compare brute force against two spatial segmentation techniques: uniform grid and octree. Brute force performs all neighbour checks, so its cost increases rapidly as the boid count grows. The uniform grid and octree reduce the number of spatial candidates used for neighbour/collision avoidance checks by only searching nearby regions, improving the CPU update time at larger boid counts. The octree gives the lowest candidate count at 500 and 1000 boids, while the uniform grid has lower build overhead and slightly lower memory use. The GPU brute-force version was slower in these tests because boid data was passed between the CPU and GPU, so transfer and synchronisation overhead outweighed the benefit of parallel execution at these sample sizes.
+
+![UML diagram](Diagrams/Screenshot%202026-05-19%20122732.png)
+
+![UML diagram](Diagrams/Screenshot%202026-05-19%20122902.png)
+
+![UML diagram](Diagrams/Screenshot%202026-05-19%20123017.png)
 
 ### 1.8 Architecture Reflection
 
@@ -119,6 +137,8 @@ This lets rendering, physics and networking share the same world representation 
 
 This separates object identity from physical behaviour.
 
+![UML diagram](Diagrams/Screenshot%202026-05-18%20170818.png)
+
 ### 2.2 Materials, Mass and Inertia
 
 Materials store density, restitution and friction. Density and shape volume produce mass, while material-pair interactions control bounciness and static/dynamic friction. This means two objects with the same shape can behave differently if their materials have different densities or interaction settings.
@@ -137,6 +157,8 @@ The default integrator is semi-implicit Euler because it is simple, fast and mor
 
 Static bodies are skipped, while kinematic bodies such as animated platforms are moved directly from their animation paths and can still affect dynamic bodies through collision response.
 
+![UML diagram](Diagrams/Screenshot%202026-05-18%20171106.png)
+
 ### 2.4 Collision Detection Pipeline
 
 Collision detection runs after integration. The broad phase first rejects distant pairs using object bounds and a spatial grid, reducing the number of expensive narrow-phase tests. The system also avoids unnecessary static-static work and records profiling values so heavy scenes can be diagnosed.
@@ -147,6 +169,8 @@ When a collision is found, the narrow phase outputs the contact normal, penetrat
 
 This staged pipeline improves scalability as object counts increase.
 
+![UML diagram](Diagrams/Screenshot%202026-05-18%20171240.png)
+
 ### 2.5 Shape-Specific Collision Detection
 
 Narrow-phase routines are selected by `ShapeType` and support spheres, cuboids, cylinders, capsules and planes. This includes sphere-object cases for common scenes and non-spherical moving-object tests so cuboids, capsules and cylinders can participate in dynamic collision detection.
@@ -154,6 +178,8 @@ Narrow-phase routines are selected by `ShapeType` and support spheres, cuboids, 
 Simple cases use direct geometric tests, such as centre distance for spheres or signed distance for planes. More complex pairs use closest-point and axis-based tests, while containers invert the collision interpretation so objects are kept inside the boundary volume.
 
 Each successful test produces a contact manifold, keeping detection separate from response.
+
+![UML diagram](Diagrams/Screenshot%202026-05-18%20171549.png)
 
 ### 2.6 Collision Response
 
@@ -164,6 +190,8 @@ Impulses affect both linear and angular velocity. Angular response uses the cont
 Friction is applied with tangent impulses. Static friction resists initial sliding, while dynamic friction reduces sliding motion once it begins.
 
 This accounts for mass, bounciness, friction and rotation.
+
+![UML diagram](Diagrams/Screenshot%202026-05-18%20171716.png)
 
 ### 2.7 Animated Objects, Containers and Spawners
 
@@ -189,12 +217,10 @@ If repeated, I would add continuous collision detection and a stronger iterative
 
 ## References
 
-Buckland, M. (2005) *Programming Game AI by Example*. Plano, TX: Wordware Publishing.
+Buckland, M. (2005) Programming Game AI by Example. Plano, TX: Wordware Publishing.
 
-Ericson, C. (2005) *Real-Time Collision Detection*. San Francisco, CA: Morgan Kaufmann.
+Ericson, C. (2005) Real-Time Collision Detection. San Francisco, CA: Morgan Kaufmann.
 
-Meagher, D. (1982) ‘Geometric modeling using octree encoding’, *Computer Graphics and Image Processing*, 19(2), pp. 129–147.
+Reynolds, C.W. (1987) ‘Flocks, herds and schools: A distributed behavioral model’, Computer Graphics, 21(4), pp. 25–34.
 
-Reynolds, C.W. (1987) ‘Flocks, herds and schools: A distributed behavioral model’, *Computer Graphics*, 21(4), pp. 25–34.
-
-Teschner, M., Heidelberger, B., Müller, M., Pomeranets, D. and Gross, M. (2003) ‘Optimized spatial hashing for collision detection of deformable objects’, *Proceedings of Vision, Modeling, Visualization 2003*, pp. 47–54.
+Teschner, M., Heidelberger, B., Müller, M., Pomeranets, D. and Gross, M. (2003) ‘Optimized spatial hashing for collision detection of deformable objects’, in Proceedings of Vision, Modeling, Visualization 2003, pp. 47–54.

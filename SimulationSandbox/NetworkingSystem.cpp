@@ -524,13 +524,21 @@ namespace Net
 
             if (p.delaySec <= 0.0f)
             {
-                if (m_snapshotSocket.Send(
+                UdpSocket& socket =
+                    (p.channel == PacketChannel::Control)
+                    ? m_controlSocket
+                    : m_snapshotSocket;
+
+                if (socket.Send(
                     p.addr,
                     p.addrLen,
                     p.payload.data(),
                     (int)p.payload.size()))
                 {
-                    ++m_stats.snapshotPacketsSent;
+                    if (p.channel == PacketChannel::Control)
+                        ++m_stats.snapshotPacketsSentOnControl;
+                    else
+                        ++m_stats.snapshotPacketsSent;
                 }
                 else
                 {
@@ -763,6 +771,16 @@ namespace Net
 
             if (expectedSize > size)
                 break;
+
+            if (!MarkSnapshotChunkIfNew(
+                hdr->peerId,
+                hdr->tick,
+                sh->chunkIndex,
+                sh->sceneGeneration))
+            {
+                ++m_stats.snapshotPacketsDropped;
+                break;
+            }
 
             ++m_stats.snapshotPacketsReceived;
 
@@ -1214,56 +1232,58 @@ namespace Net
                     continue;
                 }
 
-                if (ShouldDropSnapshotPacket())
+                auto sendSnapshotPacket = [&](PacketChannel channel, const sockaddr_storage& addr, int addrLen)
                 {
-                    ++m_stats.snapshotPacketsDropped;
-                    continue;
-                }
-
-                const float delaySec = SampleSnapshotDelaySeconds();
-
-                if (delaySec > 0.0f)
-                {
-                    if (m_delayedOutgoingSnapshots.size() >= MAX_DELAYED_OUTGOING_SNAPSHOTS)
+                    if (ShouldDropSnapshotPacket())
                     {
                         ++m_stats.snapshotPacketsDropped;
-                        continue;
+                        return;
                     }
 
-                    DelayedOutgoingSnapshot delayed{};
-                    delayed.addr = peer.snapshotAddr;
-                    delayed.addrLen = peer.snapshotAddrLen;
-                    delayed.payload.assign(buffer, buffer + bytes);
-                    delayed.delaySec = delaySec;
-
-                    m_delayedOutgoingSnapshots.push_back(std::move(delayed));
-
-                    ++m_stats.snapshotPacketsDelayed;
-                }
-                else
-                {
-                    if (m_snapshotSocket.Send(peer.snapshotAddr, peer.snapshotAddrLen, buffer, bytes))
+                    const float delaySec = SampleSnapshotDelaySeconds();
+                    if (delaySec > 0.0f)
                     {
-                        ++m_stats.snapshotPacketsSent;
+                        if (m_delayedOutgoingSnapshots.size() >= MAX_DELAYED_OUTGOING_SNAPSHOTS)
+                        {
+                            ++m_stats.snapshotPacketsDropped;
+                            return;
+                        }
+
+                        DelayedOutgoingSnapshot delayed{};
+                        delayed.channel = channel;
+                        delayed.addr = addr;
+                        delayed.addrLen = addrLen;
+                        delayed.payload.assign(buffer, buffer + bytes);
+                        delayed.delaySec = delaySec;
+
+                        m_delayedOutgoingSnapshots.push_back(std::move(delayed));
+                        ++m_stats.snapshotPacketsDelayed;
+                        return;
+                    }
+
+                    UdpSocket& socket =
+                        (channel == PacketChannel::Control)
+                        ? m_controlSocket
+                        : m_snapshotSocket;
+
+                    if (socket.Send(addr, addrLen, buffer, bytes))
+                    {
+                        if (channel == PacketChannel::Control)
+                            ++m_stats.snapshotPacketsSentOnControl;
+                        else
+                            ++m_stats.snapshotPacketsSent;
                     }
                     else
-                    {
                         ++m_stats.snapshotPacketsSendFailed;
-                    }
-                }
+                };
+
+                sendSnapshotPacket(PacketChannel::Snapshot, peer.snapshotAddr, peer.snapshotAddrLen);
 
                 // Fallback path: some lab/home networks allow the control port
                 // but silently drop the separate snapshot port. Mirror snapshots
-                // over control so state replication still works when the control
-                // channel is known-good.
-                if (m_controlSocket.Send(peer.controlAddr, peer.controlAddrLen, buffer, bytes))
-                {
-                    ++m_stats.snapshotPacketsSentOnControl;
-                }
-                else
-                {
-                    ++m_stats.snapshotPacketsSendFailed;
-                }
+                // over control too, but still pass the mirror through the same
+                // impairment model so the coursework worst-case preset is real.
+                sendSnapshotPacket(PacketChannel::Control, peer.controlAddr, peer.controlAddrLen);
             }
         }
 
@@ -1322,6 +1342,35 @@ namespace Net
         return delayMs * 0.001f;
     }
 
+    bool NetworkingSystem::MarkSnapshotChunkIfNew(
+        uint8_t peerId,
+        uint32_t tick,
+        uint16_t chunkIndex,
+        uint32_t sceneGeneration)
+    {
+        static constexpr size_t MAX_RECENT_SNAPSHOT_CHUNKS = 4096;
+
+        const uint64_t key =
+            (uint64_t(peerId) << 56) ^
+            (uint64_t(sceneGeneration & 0xFFFFu) << 40) ^
+            (uint64_t(tick) << 8) ^
+            uint64_t(chunkIndex);
+
+        if (m_recentSnapshotChunkKeySet.find(key) != m_recentSnapshotChunkKeySet.end())
+            return false;
+
+        m_recentSnapshotChunkKeySet.insert(key);
+        m_recentSnapshotChunkKeys.push_back(key);
+
+        while (m_recentSnapshotChunkKeys.size() > MAX_RECENT_SNAPSHOT_CHUNKS)
+        {
+            m_recentSnapshotChunkKeySet.erase(m_recentSnapshotChunkKeys.front());
+            m_recentSnapshotChunkKeys.pop_front();
+        }
+
+        return true;
+    }
+
     // ============================================================
     // Snapshot priority control
     // ============================================================
@@ -1331,6 +1380,8 @@ namespace Net
         m_delayedOutgoingSnapshots.clear();
         m_delayedIncomingSnapshots.clear();
         m_pendingSnapshotChunks.clear();
+        m_recentSnapshotChunkKeys.clear();
+        m_recentSnapshotChunkKeySet.clear();
 
         m_snapshotSendCursor = 0;
     }

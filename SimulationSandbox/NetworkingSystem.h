@@ -127,11 +127,13 @@ namespace Net
         void SendGlobalCommand(const GlobalCommandPayload& payload);
         bool ShouldDropSnapshotPacket() const;
         float SampleSnapshotDelaySeconds() const;
+        bool MarkSnapshotChunkIfNew(uint8_t peerId, uint32_t tick, uint16_t chunkIndex, uint32_t sceneGeneration);
         NetworkStats m_stats{};
 
     private:
         struct DelayedOutgoingSnapshot
         {
+            PacketChannel channel = PacketChannel::Snapshot;
             sockaddr_storage addr{};
             int addrLen = 0;
             std::vector<char> payload;
@@ -164,6 +166,8 @@ namespace Net
         };
 
         std::deque<ReceivedSnapshotChunk> m_pendingSnapshotChunks;
+        std::deque<uint64_t> m_recentSnapshotChunkKeys;
+        std::unordered_set<uint64_t> m_recentSnapshotChunkKeySet;
 
         std::deque<SpawnObjectPayload> m_pendingSpawnObjects;
 

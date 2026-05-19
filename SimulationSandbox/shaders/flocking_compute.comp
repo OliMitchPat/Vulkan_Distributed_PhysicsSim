@@ -6,6 +6,14 @@ struct Boid
     vec4 velocity;
 };
 
+struct Obstacle
+{
+    vec4 position_type;
+    vec4 min_radius;
+    vec4 max_enabled;
+    vec4 normal;
+};
+
 layout(std430, binding = 0) readonly buffer InputBoids
 {
     Boid inputBoids[];
@@ -16,22 +24,32 @@ layout(std430, binding = 1) writeonly buffer OutputBoids
     Boid outputBoids[];
 };
 
+layout(std430, binding = 2) readonly buffer Obstacles
+{
+    Obstacle obstacles[];
+};
+
 layout(push_constant) uniform Params
 {
     uint boidCount;
+    uint obstacleCount;
     float dt;
     float perceptionRadius;
-    float separationRadius;
 
+    float separationRadius;
     float cohesionWeight;
     float alignmentWeight;
     float separationWeight;
-    float avoidanceWeight;
 
+    float avoidanceWeight;
     float maxSpeed;
     float maxForce;
     float boundsMargin;
+
     float boundsAvoidanceStrength;
+    float obstacleMargin;
+    float lookAheadDistance;
+    float padding0;
 
     vec4 boundsMin;
     vec4 boundsMax;
@@ -61,6 +79,36 @@ vec3 safeDesired(vec3 direction, float speed)
     return direction / len * speed;
 }
 
+vec3 safeDirection(vec3 direction, vec3 fallback)
+{
+    float len = length(direction);
+    if (len > 0.0001)
+    {
+        return direction / len;
+    }
+
+    float fallbackLen = length(fallback);
+    if (fallbackLen > 0.0001)
+    {
+        return fallback / fallbackLen;
+    }
+
+    return vec3(0.0);
+}
+
+vec3 closestPointOnSegment(vec3 a, vec3 b, vec3 point)
+{
+    vec3 ab = b - a;
+    float denom = dot(ab, ab);
+    if (denom <= 0.0001)
+    {
+        return a;
+    }
+
+    float t = clamp(dot(point - a, ab) / denom, 0.0, 1.0);
+    return a + ab * t;
+}
+
 void main()
 {
     uint i = gl_GlobalInvocationID.x;
@@ -72,6 +120,7 @@ void main()
 
     vec3 pos = inputBoids[i].position.xyz;
     vec3 vel = inputBoids[i].velocity.xyz;
+    float boidRadius = max(inputBoids[i].position.w, 0.0);
 
     vec3 cohesionSum = vec3(0.0);
     vec3 alignmentSum = vec3(0.0);
@@ -172,6 +221,103 @@ void main()
         force += limitVec(desired - vel, params.maxForce) * params.avoidanceWeight;
     }
 
+    vec3 forward = safeDesired(vel, 1.0);
+    if (length(forward) <= 0.0001)
+    {
+        forward = vec3(0.0, 0.0, 1.0);
+    }
+    vec3 lookAheadPosition = pos + forward * params.lookAheadDistance;
+    vec3 obstacleAvoidance = vec3(0.0);
+
+    for (uint obstacleIndex = 0; obstacleIndex < params.obstacleCount; ++obstacleIndex)
+    {
+        Obstacle obstacle = obstacles[obstacleIndex];
+        if (obstacle.max_enabled.w <= 0.0)
+        {
+            continue;
+        }
+
+        int type = int(obstacle.position_type.w + 0.5);
+        if (type == 0)
+        {
+            vec3 center = obstacle.position_type.xyz;
+            vec3 closest = closestPointOnSegment(pos, lookAheadPosition, center);
+            vec3 away = closest - center;
+            float distance = length(away);
+            float triggerDistance = obstacle.min_radius.w + boidRadius + params.obstacleMargin;
+            if (distance < triggerDistance)
+            {
+                float t = 1.0 - distance / max(0.0001, triggerDistance);
+                vec3 fallback = safeDirection(pos - center, -forward);
+                obstacleAvoidance += safeDirection(away, fallback) * (params.boundsAvoidanceStrength * t);
+            }
+        }
+        else if (type == 1)
+        {
+            vec3 boxMin = obstacle.min_radius.xyz;
+            vec3 boxMax = obstacle.max_enabled.xyz;
+            vec3 expandedMin = boxMin - vec3(boidRadius + params.obstacleMargin);
+            vec3 expandedMax = boxMax + vec3(boidRadius + params.obstacleMargin);
+
+            vec3 samples[4] = vec3[4](
+                pos,
+                pos + forward * (params.lookAheadDistance * 0.33),
+                pos + forward * (params.lookAheadDistance * 0.66),
+                lookAheadPosition);
+
+            vec3 bestAway = vec3(0.0);
+            float bestDistance = 3.402823e+38;
+            for (int sampleIndex = 0; sampleIndex < 4; ++sampleIndex)
+            {
+                vec3 samplePosition = samples[sampleIndex];
+                vec3 closest = clamp(samplePosition, boxMin, boxMax);
+                vec3 away = samplePosition - closest;
+                float distance = length(away);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestAway = away;
+                }
+
+                if (all(greaterThanEqual(samplePosition, expandedMin)) &&
+                    all(lessThanEqual(samplePosition, expandedMax)))
+                {
+                    bestDistance = 0.0;
+                    bestAway = samplePosition - clamp(samplePosition, boxMin, boxMax);
+                    break;
+                }
+            }
+
+            float triggerDistance = boidRadius + params.obstacleMargin;
+            if (bestDistance < triggerDistance)
+            {
+                vec3 boxCenter = 0.5 * (boxMin + boxMax);
+                vec3 away = length(bestAway) > 0.0001 ? bestAway : pos - boxCenter;
+                float t = 1.0 - bestDistance / max(0.0001, triggerDistance);
+                obstacleAvoidance += safeDirection(away, -forward) * (params.boundsAvoidanceStrength * t);
+            }
+        }
+        else if (type == 2)
+        {
+            vec3 planePoint = obstacle.position_type.xyz;
+            vec3 planeNormal = safeDirection(obstacle.normal.xyz, vec3(0.0, 1.0, 0.0));
+            float currentDistance = dot(pos - planePoint, planeNormal);
+            float futureDistance = dot(lookAheadPosition - planePoint, planeNormal);
+            float distance = min(currentDistance, futureDistance);
+            if (distance < params.obstacleMargin)
+            {
+                float t = 1.0 - distance / max(0.0001, params.obstacleMargin);
+                obstacleAvoidance += planeNormal * (params.boundsAvoidanceStrength * t);
+            }
+        }
+    }
+
+    if (length(obstacleAvoidance) > 0.0001)
+    {
+        vec3 desired = safeDesired(obstacleAvoidance, params.maxSpeed);
+        force += limitVec(desired - vel, params.maxForce) * params.avoidanceWeight;
+    }
+
     force = limitVec(force, params.maxForce);
 
     vel += force * params.dt;
@@ -179,6 +325,6 @@ void main()
 
     pos += vel * params.dt;
 
-    outputBoids[i].position = vec4(pos, 1.0);
+    outputBoids[i].position = vec4(pos, boidRadius);
     outputBoids[i].velocity = vec4(vel, 0.0);
 }

@@ -187,13 +187,29 @@ bool FlockingSystem::UpdateGpuCompute(World& world, float dt)
     for (const BoidRef& boid : m_allBoids)
     {
         GpuBoid gpu{};
-        gpu.position = glm::vec4(boid.position, 1.0f);
+        gpu.position = glm::vec4(boid.position, boid.boidRadius);
         gpu.velocity = glm::vec4(boid.velocity, 0.0f);
         gpuBoids.push_back(gpu);
     }
 
+    std::vector<GpuFlockingObstacle> gpuObstacles;
+    gpuObstacles.reserve(m_obstacles.size());
+    for (const ObstacleProxy& obstacle : m_obstacles)
+    {
+        if (!obstacle.enabled)
+            continue;
+
+        GpuFlockingObstacle gpuObstacle{};
+        gpuObstacle.position_type = glm::vec4(obstacle.position, static_cast<float>(obstacle.type));
+        gpuObstacle.min_radius = glm::vec4(obstacle.min, obstacle.radius);
+        gpuObstacle.max_enabled = glm::vec4(obstacle.max, 1.0f);
+        gpuObstacle.normal = glm::vec4(obstacle.normal, 0.0f);
+        gpuObstacles.push_back(gpuObstacle);
+    }
+
     GpuFlockingParams params{};
     params.boidCount = static_cast<uint32_t>(gpuBoids.size());
+    params.obstacleCount = static_cast<uint32_t>(gpuObstacles.size());
     params.dt = dt;
     params.perceptionRadius = settings->perceptionRadius;
     params.separationRadius = settings->separationRadius;
@@ -205,12 +221,14 @@ bool FlockingSystem::UpdateGpuCompute(World& world, float dt)
     params.maxForce = settings->maxForce;
     params.boundsMargin = m_boundsMargin;
     params.boundsAvoidanceStrength = m_boundsAvoidanceStrength;
+    params.obstacleMargin = m_obstacleMargin;
+    params.lookAheadDistance = m_lookAheadDistance;
     params.boundsMin = glm::vec4(m_boundsMin, 0.0f);
     params.boundsMax = glm::vec4(m_boundsMax, 0.0f);
 
     try
     {
-        m_gpuCompute->UpdateBoids(gpuBoids, params);
+        m_gpuCompute->UpdateBoids(gpuBoids, gpuObstacles, params);
     }
     catch (...)
     {
@@ -251,7 +269,8 @@ bool FlockingSystem::UpdateGpuCompute(World& world, float dt)
     const GpuFlockingTiming& timing = m_gpuCompute->Timing();
     m_stats.neighbourChecks = static_cast<int>(m_updateBoidIndices.size() * (m_allBoids.size() - 1));
     m_stats.spatialCandidateChecks = m_stats.neighbourChecks;
-    m_stats.memoryEstimateBytes = m_allBoids.size() * sizeof(GpuBoid) * 4;
+    m_stats.collisionAvoidanceChecks = static_cast<int>(m_updateBoidIndices.size() * gpuObstacles.size());
+    m_stats.memoryEstimateBytes = m_allBoids.size() * sizeof(GpuBoid) * 4 + gpuObstacles.size() * sizeof(GpuFlockingObstacle) * 2;
     m_stats.gpuComputeAvailable = true;
     m_stats.gpuFallbackActive = false;
     m_stats.gpuUploadMs = timing.uploadMs;

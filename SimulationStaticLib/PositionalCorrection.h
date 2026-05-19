@@ -15,8 +15,18 @@ inline void PositionalCorrection(
 {
     if (!m.hit) return;
 
-    const float invMassA = A.InverseMass();
-    const float invMassB = B.InverseMass();
+    // Kinematic animated bodies are externally moved platforms/obstacles.
+    // Leaving the usual loose correction slop here makes dynamic bodies appear
+    // slightly embedded while resting on animated geometry, especially on peers
+    // that receive the kinematic surface over the network.
+    if ((A.IsDynamic() && B.IsKinematic()) || (A.IsKinematic() && B.IsDynamic()))
+    {
+        percent = 1.0f;
+        slop = 0.00005f;
+    }
+
+    const float invMassA = A.EffectiveInverseMass();
+    const float invMassB = B.EffectiveInverseMass();
     const float invMassSum = invMassA + invMassB;
     if (invMassSum == 0.0f) return;
 

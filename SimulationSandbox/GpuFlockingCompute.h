@@ -15,13 +15,22 @@ struct GpuBoid
     glm::vec4 velocity{ 0.0f };
 };
 
+struct GpuFlockingObstacle
+{
+    glm::vec4 position_type{ 0.0f }; // xyz = position, w = FlockingObstacleType
+    glm::vec4 min_radius{ 0.0f };    // xyz = AABB min, w = sphere radius
+    glm::vec4 max_enabled{ 0.0f };   // xyz = AABB max, w = enabled
+    glm::vec4 normal{ 0.0f, 1.0f, 0.0f, 0.0f };
+};
+
 struct GpuFlockingParams
 {
     uint32_t boidCount = 0;
+    uint32_t obstacleCount = 0;
     float dt = 0.0f;
     float perceptionRadius = 0.0f;
-    float separationRadius = 0.0f;
 
+    float separationRadius = 0.0f;
     float cohesionWeight = 0.0f;
     float alignmentWeight = 0.0f;
     float separationWeight = 0.0f;
@@ -32,12 +41,17 @@ struct GpuFlockingParams
     float boundsMargin = 3.0f;
     float boundsAvoidanceStrength = 20.0f;
 
+    float obstacleMargin = 1.0f;
+    float lookAheadDistance = 4.0f;
+    float padding0 = 0.0f;
+
     glm::vec4 boundsMin{ -20.0f, 0.0f, -20.0f, 0.0f };
     glm::vec4 boundsMax{ 20.0f, 20.0f, 20.0f, 0.0f };
 };
 
 static_assert(sizeof(GpuBoid) == sizeof(float) * 8);
-static_assert(sizeof(GpuFlockingParams) == 80);
+static_assert(sizeof(GpuFlockingObstacle) == sizeof(float) * 16);
+static_assert(sizeof(GpuFlockingParams) == 96);
 
 struct GpuFlockingTiming
 {
@@ -58,10 +72,11 @@ public:
         std::mutex* queueMutex);
 
     void Resize(uint32_t boidCount);
+    void Resize(uint32_t boidCount, uint32_t obstacleCount);
     void UploadBoids(const std::vector<GpuBoid>& cpuBoids);
     void Dispatch(const GpuFlockingParams& params);
     void DownloadBoids(std::vector<GpuBoid>& cpuBoids);
-    void UpdateBoids(std::vector<GpuBoid>& cpuBoids, const GpuFlockingParams& params);
+    void UpdateBoids(std::vector<GpuBoid>& cpuBoids, const std::vector<GpuFlockingObstacle>& obstacles, const GpuFlockingParams& params);
     void Shutdown();
 
     bool IsAvailable() const { return m_available; }
@@ -71,6 +86,7 @@ public:
 private:
     void CreatePipeline();
     void CreateBuffers(uint32_t boidCount);
+    void CreateBuffers(uint32_t boidCount, uint32_t obstacleCount);
     void DestroyBuffers();
     void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory);
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
@@ -104,6 +120,10 @@ private:
     VkDeviceMemory m_uploadStagingMemory = VK_NULL_HANDLE;
     VkBuffer m_readbackStagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_readbackStagingMemory = VK_NULL_HANDLE;
+    VkBuffer m_obstacleBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_obstacleMemory = VK_NULL_HANDLE;
+    VkBuffer m_obstacleStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_obstacleStagingMemory = VK_NULL_HANDLE;
 
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
@@ -111,7 +131,9 @@ private:
 
     uint32_t m_currentInputIndex = 0;
     uint32_t m_boidCapacity = 0;
+    uint32_t m_obstacleCapacity = 0;
     VkDeviceSize m_bufferSize = 0;
+    VkDeviceSize m_obstacleBufferSize = 0;
     bool m_available = false;
     std::string m_lastError;
     GpuFlockingTiming m_timing{};

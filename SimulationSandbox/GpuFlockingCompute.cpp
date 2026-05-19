@@ -78,10 +78,16 @@ void GpuFlockingCompute::CreatePipeline()
     outputBinding.descriptorCount = 1;
     outputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-    const VkDescriptorSetLayoutBinding bindings[] = { inputBinding, outputBinding };
+    VkDescriptorSetLayoutBinding obstacleBinding{};
+    obstacleBinding.binding = 2;
+    obstacleBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    obstacleBinding.descriptorCount = 1;
+    obstacleBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    const VkDescriptorSetLayoutBinding bindings[] = { inputBinding, outputBinding, obstacleBinding };
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 2;
+    layoutInfo.bindingCount = 3;
     layoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_descriptorSetLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create GPU flocking descriptor set layout");
@@ -129,19 +135,29 @@ void GpuFlockingCompute::CreatePipeline()
 
 void GpuFlockingCompute::Resize(uint32_t boidCount)
 {
+    Resize(boidCount, 0);
+}
+
+void GpuFlockingCompute::Resize(uint32_t boidCount, uint32_t obstacleCount)
+{
     if (!m_available)
         return;
 
     if (boidCount == 0)
         return;
 
-    if (boidCount <= m_boidCapacity)
+    if (boidCount <= m_boidCapacity && std::max<uint32_t>(obstacleCount, 1) <= m_obstacleCapacity)
         return;
 
-    CreateBuffers(boidCount);
+    CreateBuffers(boidCount, obstacleCount);
 }
 
 void GpuFlockingCompute::CreateBuffers(uint32_t boidCount)
+{
+    CreateBuffers(boidCount, 0);
+}
+
+void GpuFlockingCompute::CreateBuffers(uint32_t boidCount, uint32_t obstacleCount)
 {
     if (m_queueMutex)
     {
@@ -156,6 +172,8 @@ void GpuFlockingCompute::CreateBuffers(uint32_t boidCount)
 
     m_boidCapacity = std::max<uint32_t>(boidCount, 256);
     m_bufferSize = sizeof(GpuBoid) * static_cast<VkDeviceSize>(m_boidCapacity);
+    m_obstacleCapacity = std::max<uint32_t>(obstacleCount, 1);
+    m_obstacleBufferSize = sizeof(GpuFlockingObstacle) * static_cast<VkDeviceSize>(m_obstacleCapacity);
 
     const VkBufferUsageFlags gpuUsage =
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -164,6 +182,12 @@ void GpuFlockingCompute::CreateBuffers(uint32_t boidCount)
 
     CreateBuffer(m_bufferSize, gpuUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_boidBufferA, m_boidMemoryA);
     CreateBuffer(m_bufferSize, gpuUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_boidBufferB, m_boidMemoryB);
+    CreateBuffer(
+        m_obstacleBufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        m_obstacleBuffer,
+        m_obstacleMemory);
 
     CreateBuffer(
         m_bufferSize,
@@ -178,12 +202,18 @@ void GpuFlockingCompute::CreateBuffers(uint32_t boidCount)
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         m_readbackStagingBuffer,
         m_readbackStagingMemory);
+    CreateBuffer(
+        m_obstacleBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        m_obstacleStagingBuffer,
+        m_obstacleStagingMemory);
 
     if (!m_descriptorPool)
     {
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSize.descriptorCount = 4;
+        poolSize.descriptorCount = 6;
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -223,7 +253,12 @@ void GpuFlockingCompute::CreateBuffers(uint32_t boidCount)
         outputInfo.offset = 0;
         outputInfo.range = m_bufferSize;
 
-        VkWriteDescriptorSet writes[2]{};
+        VkDescriptorBufferInfo obstacleInfo{};
+        obstacleInfo.buffer = m_obstacleBuffer;
+        obstacleInfo.offset = 0;
+        obstacleInfo.range = m_obstacleBufferSize;
+
+        VkWriteDescriptorSet writes[3]{};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[0].dstSet = set;
         writes[0].dstBinding = 0;
@@ -238,7 +273,14 @@ void GpuFlockingCompute::CreateBuffers(uint32_t boidCount)
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[1].pBufferInfo = &outputInfo;
 
-        vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+        writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[2].dstSet = set;
+        writes[2].dstBinding = 2;
+        writes[2].descriptorCount = 1;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[2].pBufferInfo = &obstacleInfo;
+
+        vkUpdateDescriptorSets(m_device, 3, writes, 0, nullptr);
     };
 
     writeSet(m_descriptorSetA, m_boidBufferA, m_boidBufferB);
@@ -371,21 +413,30 @@ void GpuFlockingCompute::DownloadBoids(std::vector<GpuBoid>& cpuBoids)
     m_timing.totalMs = m_timing.uploadMs + m_timing.dispatchMs + m_timing.readbackMs;
 }
 
-void GpuFlockingCompute::UpdateBoids(std::vector<GpuBoid>& cpuBoids, const GpuFlockingParams& params)
+void GpuFlockingCompute::UpdateBoids(std::vector<GpuBoid>& cpuBoids, const std::vector<GpuFlockingObstacle>& obstacles, const GpuFlockingParams& params)
 {
     if (!m_available || cpuBoids.empty() || params.boidCount == 0)
         return;
 
     const auto totalStart = std::chrono::steady_clock::now();
-    Resize(static_cast<uint32_t>(cpuBoids.size()));
+    Resize(static_cast<uint32_t>(cpuBoids.size()), static_cast<uint32_t>(obstacles.size()));
 
     const VkDeviceSize size = sizeof(GpuBoid) * static_cast<VkDeviceSize>(cpuBoids.size());
+    const VkDeviceSize obstacleSize = sizeof(GpuFlockingObstacle) * static_cast<VkDeviceSize>(obstacles.size());
 
     const auto uploadStart = std::chrono::steady_clock::now();
     void* uploadMapped = nullptr;
     vkMapMemory(m_device, m_uploadStagingMemory, 0, size, 0, &uploadMapped);
     std::memcpy(uploadMapped, cpuBoids.data(), static_cast<size_t>(size));
     vkUnmapMemory(m_device, m_uploadStagingMemory);
+
+    if (!obstacles.empty())
+    {
+        void* obstacleMapped = nullptr;
+        vkMapMemory(m_device, m_obstacleStagingMemory, 0, obstacleSize, 0, &obstacleMapped);
+        std::memcpy(obstacleMapped, obstacles.data(), static_cast<size_t>(obstacleSize));
+        vkUnmapMemory(m_device, m_obstacleStagingMemory);
+    }
     const auto uploadEnd = std::chrono::steady_clock::now();
 
     const auto dispatchStart = std::chrono::steady_clock::now();
@@ -402,16 +453,31 @@ void GpuFlockingCompute::UpdateBoids(std::vector<GpuBoid>& cpuBoids, const GpuFl
     VkBufferCopy uploadCopy{};
     uploadCopy.size = size;
     vkCmdCopyBuffer(m_commandBuffer, m_uploadStagingBuffer, inputBuffer, 1, &uploadCopy);
+    if (!obstacles.empty())
+    {
+        VkBufferCopy obstacleCopy{};
+        obstacleCopy.size = obstacleSize;
+        vkCmdCopyBuffer(m_commandBuffer, m_obstacleStagingBuffer, m_obstacleBuffer, 1, &obstacleCopy);
+    }
 
-    VkBufferMemoryBarrier uploadBarrier{};
-    uploadBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    uploadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    uploadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    uploadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    uploadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    uploadBarrier.buffer = inputBuffer;
-    uploadBarrier.offset = 0;
-    uploadBarrier.size = size;
+    VkBufferMemoryBarrier uploadBarriers[2]{};
+    uploadBarriers[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    uploadBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    uploadBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    uploadBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    uploadBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    uploadBarriers[0].buffer = inputBuffer;
+    uploadBarriers[0].offset = 0;
+    uploadBarriers[0].size = size;
+
+    uploadBarriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    uploadBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    uploadBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    uploadBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    uploadBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    uploadBarriers[1].buffer = m_obstacleBuffer;
+    uploadBarriers[1].offset = 0;
+    uploadBarriers[1].size = obstacles.empty() ? VK_WHOLE_SIZE : obstacleSize;
 
     vkCmdPipelineBarrier(
         m_commandBuffer,
@@ -420,8 +486,8 @@ void GpuFlockingCompute::UpdateBoids(std::vector<GpuBoid>& cpuBoids, const GpuFl
         0,
         0,
         nullptr,
-        1,
-        &uploadBarrier,
+        obstacles.empty() ? 1 : 2,
+        uploadBarriers,
         0,
         nullptr);
 
@@ -557,10 +623,14 @@ void GpuFlockingCompute::DestroyBuffers()
     destroyBuffer(m_boidBufferB, m_boidMemoryB);
     destroyBuffer(m_uploadStagingBuffer, m_uploadStagingMemory);
     destroyBuffer(m_readbackStagingBuffer, m_readbackStagingMemory);
+    destroyBuffer(m_obstacleBuffer, m_obstacleMemory);
+    destroyBuffer(m_obstacleStagingBuffer, m_obstacleStagingMemory);
     m_descriptorSetA = VK_NULL_HANDLE;
     m_descriptorSetB = VK_NULL_HANDLE;
     m_boidCapacity = 0;
+    m_obstacleCapacity = 0;
     m_bufferSize = 0;
+    m_obstacleBufferSize = 0;
 }
 
 void GpuFlockingCompute::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory)

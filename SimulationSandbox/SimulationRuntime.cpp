@@ -797,15 +797,36 @@ static void SimulationThreadFunc(SimSharedState& shared, World& world,
                     shared.sceneTransitionRemainingSec.store(0.0f, std::memory_order_relaxed);
                     shared.sceneTransitionActive.store(false, std::memory_order_release);
 
-                    // Clear any object traffic that slipped through during transition.
+                    const uint32_t transitionSceneGeneration =
+                        shared.sceneGeneration.load(std::memory_order_acquire);
+
+                    // Keep valid new-scene spawns that arrived during the
+                    // transition pause. Dropping these could remove the first
+                    // spawned object on remote peers when latency/jitter is high.
                     {
                         std::lock_guard<std::mutex> lk(shared.inSpawnMutex);
-                        shared.inSpawnEvents.clear();
+                        shared.inSpawnEvents.erase(
+                            std::remove_if(
+                                shared.inSpawnEvents.begin(),
+                                shared.inSpawnEvents.end(),
+                                [transitionSceneGeneration](const Net::SpawnObjectPayload& payload)
+                                {
+                                    return payload.sceneGeneration != transitionSceneGeneration;
+                                }),
+                            shared.inSpawnEvents.end());
                     }
 
                     {
                         std::lock_guard<std::mutex> lk(shared.outSpawnMutex);
-                        shared.outSpawnEvents.clear();
+                        shared.outSpawnEvents.erase(
+                            std::remove_if(
+                                shared.outSpawnEvents.begin(),
+                                shared.outSpawnEvents.end(),
+                                [transitionSceneGeneration](const Net::SpawnObjectPayload& payload)
+                                {
+                                    return payload.sceneGeneration != transitionSceneGeneration;
+                                }),
+                            shared.outSpawnEvents.end());
                     }
 
                     {

@@ -801,29 +801,38 @@ namespace Net
 
         case MsgType::SPAWN_OBJECT:
         {
-            // Reliable channel: always ACK, including duplicates.
-            SendAck(m_controlSocket, *peer, m_localPeerId, hdr->seq);
-
             if (size < (int)sizeof(MsgHeader) + (int)sizeof(SpawnObjectPayload))
                 break;
+
+            const SpawnObjectPayload* payload =
+                reinterpret_cast<const SpawnObjectPayload*>(
+                    data + sizeof(MsgHeader));
+
+            // If a spawn for the next scene arrives before the scene-change
+            // command has advanced this peer's generation, do not ACK it yet.
+            // The sender will retry and the spawn can be accepted once the
+            // receiver has loaded the matching scene generation.
+            if (payload->sceneGeneration > m_currentSceneGeneration)
+                break;
+
+            // Stale spawns from older scenes can be acknowledged and dropped.
+            if (payload->sceneGeneration < m_currentSceneGeneration)
+            {
+                SendAck(m_controlSocket, *peer, m_localPeerId, hdr->seq);
+                if (!IsDuplicateReliable(*peer, hdr->seq))
+                    MarkReliableReceived(*peer, hdr->seq);
+                break;
+            }
+
+            // Reliable channel: ACK matching-generation messages, including
+            // duplicates, so the sender can stop retrying once this scene is ready.
+            SendAck(m_controlSocket, *peer, m_localPeerId, hdr->seq);
 
             // Duplicate suppression without assuming in-order UDP delivery.
             if (IsDuplicateReliable(*peer, hdr->seq))
                 break;
 
             MarkReliableReceived(*peer, hdr->seq);
-
-            const SpawnObjectPayload* payload =
-                reinterpret_cast<const SpawnObjectPayload*>(
-                    data + sizeof(MsgHeader));
-
-            // Drop spawns from the wrong scene instance.
-            // ACK has already been sent, so the sender stops resending it,
-            // but this peer will not apply stale object creation.
-            if (payload->sceneGeneration != m_currentSceneGeneration)
-            {
-                break;
-            }
 
             m_pendingSpawnObjects.push_back(*payload);
             ++m_stats.spawnPacketsReceived;
